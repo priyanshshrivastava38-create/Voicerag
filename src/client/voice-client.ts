@@ -58,7 +58,12 @@ export class VoiceClient {
   async connect(conversationId: string | null = null) {
     this.wantOpen = true;
     this.conversationId = conversationId;
-    await this.player.init(); // inside the user gesture that called connect()
+    try {
+      await this.player.init(); // inside the user gesture that called connect()
+    } catch {
+      // No Web Audio output: keep going so typed questions and on-screen answers still work.
+      this.events.onError("AUDIO_UNAVAILABLE", "This browser can't play audio here, so answers will appear as text only.");
+    }
     this.open();
   }
 
@@ -80,8 +85,19 @@ export class VoiceClient {
       this.player.stop();
       if (!this.wantOpen) return this.setConn("disconnected");
       if (ev.code === 1008 || this.reconnectAttempts >= 6) {
+        this.wantOpen = false;
+        this.stopMic();
         this.setConn("disconnected");
-        this.events.onError("DISCONNECTED", "Connection lost. Check that you are signed in, then start again.");
+        this.setAssistant("idle");
+        // A rejected upgrade is indistinguishable from a network drop (1006): ask the API which it was.
+        void fetch("/api/me")
+          .then((r) => r.status === 401)
+          .catch(() => false)
+          .then((expired) =>
+            expired
+              ? this.events.onError("SESSION_EXPIRED", "Your session has expired. Sign in again to continue.")
+              : this.events.onError("DISCONNECTED", "Connection to the server was lost. Check your network, then start again."),
+          );
         return;
       }
       const delay = Math.min(8000, 400 * 2 ** this.reconnectAttempts++);

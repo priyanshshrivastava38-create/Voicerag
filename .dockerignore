@@ -1,0 +1,13 @@
+node_modules
+.next
+.git
+.env
+.env.*
+!.env.example
+storage
+playwright-report
+test-results
+bench-results
+.venv-tts
+.vendor
+*.tsbuildinfo

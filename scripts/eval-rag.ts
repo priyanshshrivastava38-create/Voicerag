@@ -58,23 +58,29 @@ async function main() {
   }
 
   const holdoutIds = new Set(EVAL.filter((c) => c.split === "holdout").map((c) => c.id));
-  const tuneRows = rows.filter((r) => !holdoutIds.has(r.id));
+  // Realistic and validation cases are both excluded from tuning.
+  const realisticIds = new Set(EVAL.filter((c) => c.split === "realistic" || c.split === "validation").map((c) => c.id));
+  const tuneRows = rows.filter((r) => !holdoutIds.has(r.id) && !realisticIds.has(r.id));
+  const realRows = rows.filter((r) => realisticIds.has(r.id));
   const holdRows = rows.filter((r) => holdoutIds.has(r.id));
   const accOf = (rs: R[]) => rs.filter((r) => r.abstain === (r.kind === "unanswerable" || r.kind === "forbidden")).length / Math.max(1, rs.length);
   const answerable = rows.filter((r) => r.kind === "answerable" || r.kind === "injection");
   const shouldAbstain = rows.filter((r) => r.kind === "unanswerable" || r.kind === "forbidden");
   const recallAt = (k: number) => answerable.filter((r) => r.goldRank !== null && r.goldRank <= k).length / answerable.length;
   const mrr = answerable.reduce((a, r) => a + (r.goldRank ? 1 / r.goldRank : 0), 0) / answerable.length;
+  // With thresholds given (the sweep), only the tuning split is scored: held-out and realistic cases
+  // must never influence threshold choice.
   const absAcc = (th?: { minSim: number; minSimKw: number }) => {
+    const cases = th ? EVAL.filter((c) => !c.split || c.split === "tune") : EVAL;
     let ok = 0;
-    for (const c of EVAL) {
+    for (const c of cases) {
       const r = rows.find((x) => x.id === c.id)!;
       // Re-run policy from stored top candidates for threshold sweeps.
       const abst = th ? r.ranked.every((e) => !(e.sim >= th.minSim || (e.sim >= th.minSimKw && e.cov >= 0.5))) : r.abstain;
       const want = c.kind === "unanswerable" || c.kind === "forbidden";
       if (abst === want) ok++;
     }
-    return ok / EVAL.length;
+    return ok / cases.length;
   };
   // Threshold sweep (report only; never auto-applied). Small eval sets overfit: prefer the
   // middle of the best-scoring region over its edge.
@@ -95,6 +101,8 @@ async function main() {
     abstentionAccuracyTuneSplit: accOf(tuneRows),
     abstentionAccuracyHoldout: accOf(holdRows),
     holdoutCases: holdRows.length,
+    abstentionAccuracyRealistic: accOf(realRows),
+    realisticCases: realRows.length,
     falseAbstentions: answerable.filter((r) => r.abstain).map((r) => r.id),
     missedAbstentions: shouldAbstain.filter((r) => !r.abstain).map((r) => r.id),
     permissionLeaks: rows.filter((r) => r.leak).map((r) => r.id),
@@ -107,10 +115,10 @@ async function main() {
   console.log("\n=== Retrieval (no LLM) ===");
   console.log(`cases ${rows.length} · Recall@1 ${pct(retrieval.recallAt1)} · Recall@3 ${pct(retrieval.recallAt3)} · Recall@${K} ${pct(retrieval.recallAtK)} · MRR ${retrieval.mrr.toFixed(3)} · gold in final evidence ${pct(retrieval.evidenceRecall)}`);
   console.log(`abstention accuracy ${pct(retrieval.abstentionAccuracy)} (thresholds ${env.ragMinVectorSim}/${env.ragMinVectorSimWithKeyword}); false abstentions: ${retrieval.falseAbstentions.join(",") || "none"}; missed abstentions: ${retrieval.missedAbstentions.join(",") || "none"}`);
-  console.log(`abstention accuracy by split — tuning set ${pct(retrieval.abstentionAccuracyTuneSplit)} (n=${tuneRows.length}, in-sample) · held-out ${pct(retrieval.abstentionAccuracyHoldout)} (n=${holdRows.length})`);
+  console.log(`abstention accuracy by split — tuning set ${pct(retrieval.abstentionAccuracyTuneSplit)} (n=${tuneRows.length}, in-sample) · held-out ${pct(retrieval.abstentionAccuracyHoldout)} (n=${holdRows.length}) · realistic ${pct(retrieval.abstentionAccuracyRealistic)} (n=${realRows.length})`);
   console.log(`permission leaks: ${retrieval.permissionLeaks.length ? retrieval.permissionLeaks.join(",") : "none"}`);
   console.log(`top cosine — answerable p50 ${retrieval.topSimAnswerable.p50?.toFixed(3)} min ${retrieval.topSimAnswerable.min?.toFixed(3)} · should-abstain p50 ${retrieval.topSimShouldAbstain.p50?.toFixed(3)} max ${retrieval.topSimShouldAbstain.max?.toFixed(3)}`);
-  console.log(`sweep best accuracy ${pct(best)} for minSim ${retrieval.thresholds.bestRegion.minSim.join("–")}, minSimKw ${retrieval.thresholds.bestRegion.minSimKw.join("–")}`);
+  console.log(`sweep (tuning split only) best accuracy ${pct(best)} for minSim ${retrieval.thresholds.bestRegion.minSim.join("–")}, minSimKw ${retrieval.thresholds.bestRegion.minSimKw.join("–")}`);
   console.log(`retrieval latency (embed+search, warm cache off) p50 ${retrieval.latencyMs.p50} ms p95 ${retrieval.latencyMs.p95} ms`);
 
   // ---------------- generation ----------------
@@ -174,6 +182,9 @@ async function main() {
     console.log(`answer accuracy ${pct(gsum.answerAccuracy)} · abstention correct ${pct(gsum.abstentionCorrect)} · cites gold source ${pct(gsum.citationHasGold)} · all citations gold ${pct(gsum.citationAllGold)}`);
     console.log(`groundedness (lexical heuristic, % supported sentences) p50 ${gsum.groundedness.p50} min ${gsum.groundedness.min} · injection resisted ${pct(gsum.injectionResisted)} · leaks in answers: ${gsum.permissionLeaksInAnswers.join(",") || "none"}`);
     console.log(`LLM TTFT p50 ${gsum.llmTtftMs.p50} ms p95 ${gsum.llmTtftMs.p95} ms · text turn total p50 ${gsum.turnMs.p50} ms p95 ${gsum.turnMs.p95} ms`);
+    const splitOf = (id: string) => EVAL.find((c) => c.id === id)?.split ?? "tune";
+    const bySplit = (sp: string) => gens.filter((g) => splitOf(g.id) === sp);
+    console.log(`all cases correct by split — tune ${pct(bySplit("tune").filter((g) => g.ok).length / Math.max(1, bySplit("tune").length))} (n=${bySplit("tune").length}) · held-out ${pct(bySplit("holdout").filter((g) => g.ok).length / Math.max(1, bySplit("holdout").length))} (n=${bySplit("holdout").length}) · realistic ${pct(bySplit("realistic").filter((g) => g.ok).length / Math.max(1, bySplit("realistic").length))} (n=${bySplit("realistic").length}) · validation ${pct(bySplit("validation").filter((g) => g.ok).length / Math.max(1, bySplit("validation").length))} (n=${bySplit("validation").length})`);
     for (const f of gsum.failures) console.log(`  FAIL ${f.id}: ${f.answer.replace(/\s+/g, " ").slice(0, 160)}`);
   }
 

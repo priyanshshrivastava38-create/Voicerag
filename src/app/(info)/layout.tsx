@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 export default async function InfoLayout({ children }: { children: React.ReactNode }) {
   const user = await currentUser();
   if (!user) redirect("/login");
+  if (user.mustChangePassword) redirect("/account/password");
   return (
     <div className="min-h-screen">
       <TopNav role={user.role} />

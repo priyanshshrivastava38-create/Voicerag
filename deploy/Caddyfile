@@ -1,0 +1,42 @@
+# Caddy: TLS termination (automatic Let's Encrypt) in front of the VIH VoiceRAG app.
+# DOMAIN and ACME_EMAIL come from .env.production via deploy/docker-compose.yml.
+# HSTS, CSP and the other security headers are set by the app itself; Caddy only adds TLS.
+{
+	email {$ACME_EMAIL}
+	servers {
+		timeouts {
+			# Keep-alive idle time for plain HTTP connections. Upgraded WebSocket connections are
+			# not subject to it; the app pings every 30 s and reaps dead peers itself.
+			idle 5m
+			read_header 15s
+		}
+	}
+}
+
+{$DOMAIN} {
+	# Document uploads are capped by the app (VOICERAG_MAX_UPLOAD_MB, default 20); allow a little more.
+	request_body {
+		max_size 25MB
+	}
+
+	# Caddy preserves Host (the app compares it with Origin) and proxies WebSocket upgrades
+	# (/ws/voice) automatically. It sets X-Forwarded-For to the real client address (incoming
+	# X-Forwarded-* from untrusted clients is not trusted), which the app uses when TRUST_PROXY=true.
+	reverse_proxy app:3100 {
+		# Stream audio/TTS frames and responses immediately.
+		flush_interval -1
+		# On a config reload, give open voice sessions 5 minutes before they are closed.
+		stream_close_delay 5m
+		transport http {
+			dial_timeout 5s
+			# Shorter than the app's 65 s keep-alive, so Caddy never reuses a socket the app closed.
+			keepalive 60s
+		}
+	}
+
+	# Access log on stdout (cookies and Authorization headers are redacted by Caddy).
+	log {
+		output stdout
+		format json
+	}
+}

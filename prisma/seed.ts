@@ -1,12 +1,14 @@
 // Seeds groups, collections, users and the SYNTHETIC documents, then indexes them with the
 // configured embedding provider. Idempotent: re-running reuses users and skips identical files.
 //   npm run seed:docs && npm run db:seed
+//   npm run db:seed -- --docs-only   groups, collections and documents only (no demo accounts);
+//                                    uploads as the first administrator (npm run admin:create)
 import fs from "node:fs";
 import path from "node:path";
 
 if (fs.existsSync(".env") && !process.env.VITEST) process.loadEnvFile(".env");
 
-export async function seed(opts: { password?: string; log?: boolean } = {}) {
+export async function seed(opts: { password?: string; log?: boolean; docsOnly?: boolean } = {}) {
   const { prisma } = await import("../src/lib/db");
   const { hashPassword } = await import("../src/lib/crypto");
   const { uploadDocument } = await import("../src/server/documents");
@@ -28,14 +30,17 @@ export async function seed(opts: { password?: string; log?: boolean } = {}) {
   }
 
   const users = new Map<string, { id: string; email: string; name: string; role: "ADMIN" | "MEMBER" }>();
-  for (const u of USERS) {
+  for (const u of opts.docsOnly ? [] : USERS) {
     const row = await prisma.user.upsert({ where: { email: u.email }, update: { name: u.name, role: u.role }, create: { email: u.email, name: u.name, role: u.role, passwordHash: hashPassword(password) } });
     users.set(u.email, { id: row.id, email: row.email, name: row.name, role: row.role });
     for (const g of u.groups) await prisma.groupMember.upsert({ where: { groupId_userId: { groupId: groups.get(g)!, userId: row.id } }, update: {}, create: { groupId: groups.get(g)!, userId: row.id } });
   }
   invalidateScopes();
 
-  const admin = users.get("admin@vih.test")!;
+  const admin =
+    users.get("admin@vih.test") ??
+    (await prisma.user.findFirst({ where: { role: "ADMIN", disabled: false }, orderBy: { createdAt: "asc" }, select: { id: true, email: true, name: true, role: true } }));
+  if (!admin) throw new Error('No administrator exists yet. Create one first: npm run admin:create -- --email you@company.com --name "Your Name"');
   for (const d of DOCS) {
     const p = path.resolve("seed/docs", d.file);
     if (!fs.existsSync(p)) throw new Error(`Missing ${p}; run npm run seed:docs first.`);
@@ -53,7 +58,13 @@ export async function seed(opts: { password?: string; log?: boolean } = {}) {
 }
 
 if (process.argv[1]?.endsWith("seed.ts")) {
-  seed()
+  const docsOnly = process.argv.includes("--docs-only");
+  // Demo accounts share one known password: never create them on a production deployment.
+  if (process.env.NODE_ENV === "production" && !docsOnly) {
+    console.error("Refusing to create demo accounts in production. Use: npm run db:seed -- --docs-only");
+    process.exit(2);
+  }
+  seed({ docsOnly })
     .then(async () => {
       const { prisma } = await import("../src/lib/db");
       await prisma.$disconnect();

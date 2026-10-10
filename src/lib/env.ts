@@ -61,7 +61,7 @@ export const env = {
     return process.env.SPECULATIVE_PRERENDER !== "false";
   },
   get sttPartialIntervalMs() {
-    return num(process.env.STT_PARTIAL_INTERVAL_MS, 700);
+    return num(process.env.STT_PARTIAL_INTERVAL_MS, 0);
   },
   get llmProvider() {
     return str(process.env.LLM_PROVIDER, "ollama").toLowerCase();
@@ -124,13 +124,13 @@ export const env = {
     return num(process.env.EMBED_DIM, 768, 1);
   },
   get ttsProvider() {
-    return str(process.env.TTS_PROVIDER, "macsay").toLowerCase();
+    return str(process.env.TTS_PROVIDER, "piper").toLowerCase();
   },
   get ttsVoice() {
-    return str(process.env.TTS_VOICE, "Samantha");
+    return str(process.env.TTS_VOICE, "alloy");
   },
   get ttsRateWpm() {
-    return num(process.env.TTS_RATE_WPM, 190, 80);
+    return num(process.env.TTS_RATE_WPM, 180, 80);
   },
   get openaiTtsModel() {
     return str(process.env.OPENAI_TTS_MODEL, "gpt-4o-mini-tts");
@@ -142,22 +142,29 @@ export const env = {
     return process.env.GENERAL_ANSWERS !== "false";
   },
   get ragTopK() {
-    return Math.min(10, num(process.env.RAG_TOP_K, 4, 1));
+    return Math.min(10, num(process.env.RAG_TOP_K, 3, 1));
   },
   get ragCandidates() {
     return Math.min(50, num(process.env.RAG_CANDIDATES, 12, 1));
   },
   get chunkTargetWords() {
-    return num(process.env.CHUNK_TARGET_WORDS, 140, 20);
+    return num(process.env.CHUNK_TARGET_WORDS, 100, 20);
   },
   get chunkOverlapWords() {
-    return num(process.env.CHUNK_OVERLAP_WORDS, 25);
+    return num(process.env.CHUNK_OVERLAP_WORDS, 20);
   },
   get ragMinVectorSim() {
     return num(process.env.RAG_MIN_VECTOR_SIM, 0.73);
   },
   get ragMinVectorSimWithKeyword() {
     return num(process.env.RAG_MIN_VECTOR_SIM_WITH_KEYWORD, 0.66);
+  },
+  /**
+   * Below the strong thresholds but at or above this cosine similarity, the best passages are still
+   * given to the LLM, which answers only if they really answer the question (0 disables).
+   */
+  get ragMinVectorSimBorderline() {
+    return num(process.env.RAG_MIN_VECTOR_SIM_BORDERLINE, 0.6);
   },
   get ragCacheTtlMs() {
     return num(process.env.RAG_CACHE_TTL_SECONDS, 300) * 1000;

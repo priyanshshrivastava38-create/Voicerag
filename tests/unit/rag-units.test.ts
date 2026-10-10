@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { chunkBlocks } from "@/server/rag/chunk";
 import { extractMarkdown, looksLikeHeading } from "@/server/rag/extract";
 import { applyPolicy, keywordCoverage, normalizeQuery, queryTerms, type Evidence } from "@/server/rag/retrieve";
+import { expandQuery } from "@/server/rag/glossary";
 import { sanitizeFilename, validateUpload } from "@/server/rag/validate";
 
 describe("extraction and chunking", () => {
@@ -41,13 +42,28 @@ describe("upload validation", () => {
 
 describe("retrieval policy", () => {
   const e = (documentId: string, sim: number, cov = 0): Evidence => ({ chunkId: `${documentId}-${sim}`, documentId, collectionId: "c", collection: "C", title: documentId, text: "t", headingPath: null, pageStart: null, pageEnd: null, sim, keywordCoverage: cov, fused: sim });
-  const th = { minSim: 0.73, minSimKw: 0.66 };
+  const th = { minSim: 0.73, minSimKw: 0.66, minSimBorderline: 0 };
   it("abstains when nothing is strong enough", () => {
     expect(applyPolicy([e("a", 0.6, 0.2), e("b", 0.7, 0.4)], 4, th)).toMatchObject({ abstain: true, reason: "low_relevance" });
     expect(applyPolicy([], 4, th)).toMatchObject({ abstain: true, reason: "no_candidates" });
   });
   it("accepts a moderate match with strong keyword coverage", () => {
     expect(applyPolicy([e("a", 0.68, 0.6)], 4, th).abstain).toBe(false);
+  });
+  it("passes borderline matches to the LLM, best first, and still abstains below the floor", () => {
+    const b = { ...th, minSimBorderline: 0.6 };
+    const r = applyPolicy([e("a", 0.55), e("b", 0.64), e("c", 0.62)], 4, b);
+    expect(r).toMatchObject({ abstain: false, reason: "borderline" });
+    expect(r.evidence.map((x) => x.documentId)).toEqual(["b", "c"]);
+    expect(applyPolicy([e("a", 0.55, 0.2)], 4, b)).toMatchObject({ abstain: true, reason: "low_relevance" });
+  });
+  it("expands workplace shorthand without losing the original wording", () => {
+    expect(expandQuery("who signs off on my PR")).toBe("who signs off on my PR (pull request code review)");
+    expect(expandQuery("deploy to prod during a sev one")).toContain("production");
+    expect(expandQuery("deploy to prod during a sev one")).toContain("SEV1");
+    expect(expandQuery(expandQuery("my PR"))).toBe(expandQuery("my PR"));
+    expect(expandQuery("annual leave")).toBe("annual leave");
+    expect(expandQuery("express train")).toBe("express train"); // no false match inside words
   });
   it("caps evidence per document and drops weak candidates", () => {
     const r = applyPolicy([e("a", 0.9), e("a", 0.85), e("a", 0.84), e("b", 0.8), e("c", 0.3)], 4, th);

@@ -118,13 +118,33 @@ Similarity scores are **not** probabilities. The policy is explicit and tunable:
 
 - answer if top cosine ≥ `RAG_MIN_VECTOR_SIM` (0.73); or
 - answer if cosine ≥ `RAG_MIN_VECTOR_SIM_WITH_KEYWORD` (0.66) **and** ≥ 50% of the query's content terms appear in the chunk;
+- **borderline:** otherwise, if some passage has cosine ≥ `RAG_MIN_VECTOR_SIM_BORDERLINE` (0.60), the best
+  passages go to the LLM anyway, but the answer is **generated in full and verified before it is spoken**.
+  It must cite a passage, every sentence must be lexically supported by the passages it cites, and every
+  number must appear in them. Otherwise the user hears the abstention;
 - otherwise give a deterministic spoken abstention without calling the LLM.
+
+Why the borderline zone exists: casually spoken questions ("can I plug a pen drive into my laptop") score
+0.62–0.70 against the right passage, which overlaps unanswerable questions (0.60–0.69). No single
+similarity cutoff separates them, so the decision moves to the model and is then checked. Borderline
+answers reach the user later than streamed ones (full generation before speech), by design.
+
+Queries are expanded with generic workplace shorthand before search ("PR" → pull request, "prod" →
+production, "sev one" → SEV1; `src/server/rag/glossary.ts`). Company-specific terms go in
+`RAG_QUERY_GLOSSARY`.
 
 Corpus-wide words ("VIH", "Metaverse", "policy") are excluded from keyword coverage.
 
 The thresholds were tuned on 40 labelled cases and checked on 13 held-out cases. The held-out
 accuracy (84.6%) is the honest estimate (see BENCHMARKS.md). The model is also instructed to
 abstain if the passages don't answer the question. That is a second, independent check.
+
+The eval set also has a `realistic` split (25 casually phrased spoken questions) and a `validation`
+split (14 questions written after all tuning). Neither is used for tuning. With the local
+`llama3.2:1b` the remaining errors on them are mostly the model failing to apply a rule it was given
+(for example, that a 9-hour flight meets a "6 hours or longer" rule). Retrieval delivers the right
+passage for 98% of them. A stronger LLM is the next lever; re-run `npm run eval:rag -- --generate` after
+changing it.
 
 ### Grounding and prompt injection
 

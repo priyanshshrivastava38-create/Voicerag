@@ -69,7 +69,12 @@ npm run seed:docs && npm run db:seed       # synthetic users/collections/docs, i
 npm run build && npm start                 # http://localhost:3100
 ```
 
-Synthetic accounts (password = `VOICERAG_SEED_PASSWORD`):
+**Deploying for real users:** follow [docs/DEPLOY.md](docs/DEPLOY.md) (single Linux VM, Docker Compose, automatic HTTPS).
+Accounts are created by an administrator under **Users** (`/admin/users`); the first administrator is created with
+`npm run admin:create -- --email you@company.com --name "Your Name"`. Load the demo documents without demo accounts
+with `npm run db:seed -- --docs-only`.
+
+Synthetic development accounts (password = `VOICERAG_SEED_PASSWORD`; never created in production):
 
 | User | Role | Can retrieve from |
 |---|---|---|

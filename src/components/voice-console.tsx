@@ -3,7 +3,7 @@
 // expandable evidence, per-turn latency, feedback, text fallback and settings.
 /* eslint-disable @next/next/no-img-element */
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import { Icon, Logo } from "./brand";
 import type { AssistantState, ServerMsg, SourceRef, TurnMetricsView, TurnOutcome } from "@/shared/protocol";
 import { VoiceClient, type ConnState, type MicState } from "@/client/voice-client";
@@ -63,11 +63,13 @@ export function VoiceConsole(props: {
   const [conn, setConn] = useState<ConnState>("disconnected");
   const [mic, setMic] = useState<MicState>("off");
   const [assistant, setAssistant] = useState<AssistantState>("idle");
-  const [level, setLevel] = useState(0);
+  // Mic level changes ~15x/s: kept outside React state so only the meters re-render, not the console.
+  const [levelStore] = useState(createLevelStore);
   const [userSpeaking, setUserSpeaking] = useState(false);
   const [partial, setPartial] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ code: string; message: string } | null>(null);
+  const [announcement, setAnnouncement] = useState("");
   const [text, setText] = useState("");
   const [speak, setSpeak] = useState(true);
   const [rate, setRate] = useState(180);
@@ -76,12 +78,22 @@ export function VoiceConsole(props: {
   const [viewer, setViewer] = useState<{ title: string; body: string; meta: string } | null>(null);
   const [history, setHistory] = useState<{ id: string; title: string | null; updatedAt: string }[]>([]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  /** Follow new content only while the reader is at (or near) the bottom of the transcript. */
+  const stickToBottom = useRef(true);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const fail = useCallback((message: string, code = "ERROR") => setError({ code, message }), []);
+
   const loadHistory = useCallback(async () => {
-    const r = await fetch("/api/conversations");
-    if (r.ok) setHistory(((await r.json()) as { conversations: { id: string; title: string | null; updatedAt: string }[] }).conversations);
+    try {
+      const r = await fetch("/api/conversations");
+      if (r.ok) setHistory(((await r.json()) as { conversations: { id: string; title: string | null; updatedAt: string }[] }).conversations);
+    } catch {
+      /* history is non-essential; the next successful load refreshes it */
+    }
   }, []);
 
   useEffect(() => {
@@ -95,14 +107,26 @@ export function VoiceConsole(props: {
     return () => c.current?.disconnect();
   }, [loadHistory]);
 
+  // Keep the newest content in view, but never on the empty welcome screen (it would scroll the
+  // mic button and heading away) and never while the reader has scrolled up to read earlier answers.
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    const el = scrollRef.current;
+    if (!el || (!turns.length && !partial) || !stickToBottom.current) return;
+    el.scrollTop = el.scrollHeight; // instant: smooth scrolling on every streamed token stutters
   }, [turns, partial]);
 
   // Esc interrupts the assistant (unless a dialog is open, where Esc closes it).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !document.querySelector('[role="dialog"]')) clientRef.current?.interrupt("user_stop");
+      if (e.key === "Escape") {
+        if (document.querySelector('[role="dialog"]')) return; // the dialog closes itself
+        if (document.querySelector("[data-dismissable]")) {
+          setSettingsOpen(false);
+          setSidebarOpen(false);
+          return;
+        }
+        clientRef.current?.interrupt("user_stop");
+      }
       if (e.key === "/" && document.activeElement?.tagName !== "INPUT") {
         e.preventDefault();
         inputRef.current?.focus();
@@ -112,7 +136,16 @@ export function VoiceConsole(props: {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const patch = (turnId: string, f: (t: Turn) => Partial<Turn>) => setTurns((ts) => ts.map((t) => (t.turnId === turnId ? { ...t, ...f(t) } : t)));
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!settingsRef.current?.contains(e.target as Node)) setSettingsOpen(false);
+    };
+    window.addEventListener("pointerdown", onDown);
+    return () => window.removeEventListener("pointerdown", onDown);
+  }, [settingsOpen]);
+
+  const patch = useCallback((turnId: string, f: (t: Turn) => Partial<Turn>) => setTurns((ts) => ts.map((t) => (t.turnId === turnId ? { ...t, ...f(t) } : t))), []);
 
   const onServer = useCallback((m: ServerMsg) => {
     switch (m.t) {
@@ -120,6 +153,7 @@ export function VoiceConsole(props: {
         setPartial(m.text);
         break;
       case "turn_start":
+        stickToBottom.current = true; // a new question always brings the reader to the answer
         setPartial("");
         setError(null);
         setTurns((ts) => [...ts, { turnId: m.turnId, mode: m.mode, question: "", answer: "", sources: [], cited: [], abstained: false, outcome: null, metrics: null, messageId: null, searching: true, feedback: null }]);
@@ -136,13 +170,14 @@ export function VoiceConsole(props: {
       case "answer_done":
         // The final text can differ from the streamed tokens (e.g. a contradictory sentence removed).
         patch(m.turnId, () => ({ answer: m.text, cited: m.cited, abstained: m.abstained, messageId: m.messageId, grounding: m.grounding }));
+        setAnnouncement(m.text.replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, ""));
         void loadHistory();
         break;
       case "turn_end":
         patch(m.turnId, () => ({ outcome: m.outcome, metrics: m.metrics, searching: false }));
         break;
     }
-  }, [loadHistory]);
+  }, [loadHistory, patch]);
 
   function client() {
     if (!clientRef.current) {
@@ -153,10 +188,10 @@ export function VoiceConsole(props: {
             setConn(s.conn);
             setMic(s.mic);
             setAssistant(s.assistant);
-            setLevel(s.level);
+            levelStore.set(s.level);
             setUserSpeaking(s.userSpeaking);
           },
-          onError: (_code, message) => setError(message),
+          onError: (code, message) => setError({ code, message }),
         },
         { speak, rateWpm: rate },
       );
@@ -170,9 +205,32 @@ export function VoiceConsole(props: {
       return;
     }
     setError(null);
+    await begin(conversationId);
+  }
+
+  /** Connect and start the mic; any failure is shown to the user (the text box keeps working). */
+  async function begin(conversationId: string | null) {
+    try {
+      const c = client();
+      await c.connect(conversationId);
+      await c.startMic();
+    } catch {
+      fail("Voice could not start in this browser. You can still type your question below.");
+    }
+  }
+
+  /** Ensure a connection exists for a typed question. */
+  async function ensureConnected() {
     const c = client();
-    await c.connect(conversationId);
-    await c.startMic(); // on failure the text box keeps working
+    if (conn === "disconnected") {
+      try {
+        await c.connect(null);
+      } catch {
+        fail("Couldn't connect to the assistant. Check your connection and try again.");
+        return null;
+      }
+    }
+    return c;
   }
 
   function stop() {
@@ -184,14 +242,18 @@ export function VoiceConsole(props: {
     e.preventDefault();
     const q = text.trim();
     if (!q) return;
-    const c = client();
-    if (conn === "disconnected") await c.connect(null);
+    const c = await ensureConnected();
+    if (!c) return;
     c.sendText(q);
     setText("");
   }
 
-  async function openSource(s: SourceRef) {
-    const r = await fetch(`/api/chunks/${encodeURIComponent(s.chunkId)}`);
+  const openSource = useCallback(async (s: SourceRef) => {
+    const r = await fetch(`/api/chunks/${encodeURIComponent(s.chunkId)}`).catch(() => null);
+    if (!r) {
+      fail("Couldn't open the source: the server is unreachable.");
+      return;
+    }
     if (!r.ok) {
       setViewer({ title: s.title, body: "This source is no longer available (deleted, replaced, or outside your access).", meta: "" });
       return;
@@ -199,17 +261,26 @@ export function VoiceConsole(props: {
     const c = (await r.json()) as { text: string; heading: string | null; pageStart: number | null; pageEnd: number | null; current: boolean; document: { title: string; collection: string; version: number; filename: string } };
     const loc = [c.heading && `Section: ${c.heading}`, c.pageStart && `Page ${c.pageStart}${c.pageEnd && c.pageEnd !== c.pageStart ? `–${c.pageEnd}` : ""}`].filter(Boolean).join(" · ");
     setViewer({ title: c.document.title, body: c.text, meta: `${c.document.collection} · ${c.document.filename} v${c.document.version}${loc ? ` · ${loc}` : ""}${c.current ? "" : " · (superseded version)"}` });
-  }
+  }, [fail]);
 
-  async function rateTurn(t: Turn, rating: 1 | -1, comment?: string) {
-    if (!t.messageId) return;
-    const r = await fetch("/api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messageId: t.messageId, rating, ...(comment ? { comment } : {}) }) });
-    if (r.ok) patch(t.turnId, () => ({ feedback: rating }));
-  }
+  const rateTurn = useCallback(async (t: Turn, rating: 1 | -1, comment?: string): Promise<boolean> => {
+    if (!t.messageId) return false;
+    const r = await fetch("/api/feedback", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ messageId: t.messageId, rating, ...(comment ? { comment } : {}) }) }).catch(() => null);
+    if (r?.ok) {
+      patch(t.turnId, () => ({ feedback: rating }));
+      return true;
+    }
+    fail("Your feedback couldn't be saved. Please try again.");
+    return false;
+  }, [fail, patch]);
 
   async function resume(id: string) {
-    const r = await fetch(`/api/conversations/${id}`);
-    if (!r.ok) return;
+    const r = await fetch(`/api/conversations/${id}`).catch(() => null);
+    if (!r?.ok) {
+      fail(r?.status === 404 ? "That conversation no longer exists." : "Couldn't open that conversation. Please try again.");
+      if (r?.status === 404) void loadHistory();
+      return;
+    }
     const c = (await r.json()) as { messages: { id: string; role: "USER" | "ASSISTANT"; text: string; turnId: string | null; abstained: boolean; interrupted: boolean; citations: { marker: number; chunkId: string | null; documentId: string; docTitle: string; page: number | null; heading: string | null; excerpt: string; score: number }[] }[] };
     const restored: Turn[] = [];
     for (let i = 0; i < c.messages.length; i++) {
@@ -231,6 +302,7 @@ export function VoiceConsole(props: {
         feedback: null,
       });
     }
+    stickToBottom.current = true;
     setTurns(restored);
     stop();
     await start(id);
@@ -243,17 +315,17 @@ export function VoiceConsole(props: {
 
   async function deleteConversation(id: string) {
     if (!confirm("Delete this conversation? This cannot be undone.")) return;
-    const r = await fetch(`/api/conversations/${id}`, { method: "DELETE" });
-    if (r.ok) void loadHistory();
+    const r = await fetch(`/api/conversations/${id}`, { method: "DELETE" }).catch(() => null);
+    if (!r?.ok) fail("Couldn't delete the conversation. Please try again.");
+    void loadHistory();
   }
 
   async function clearHistory() {
     if (!confirm("Clear all of your conversations? This cannot be undone.")) return;
-    const r = await fetch("/api/conversations", { method: "DELETE" });
-    if (r.ok) {
-      newConversation();
-      void loadHistory();
-    }
+    const r = await fetch("/api/conversations", { method: "DELETE" }).catch(() => null);
+    if (r?.ok) newConversation();
+    else fail("Couldn't clear your history. Please try again.");
+    void loadHistory();
   }
 
   function exportConversation() {
@@ -273,19 +345,18 @@ export function VoiceConsole(props: {
   }
 
   async function ask(q: string) {
-    const c = client();
-    if (conn === "disconnected") await c.connect(null);
-    c.sendText(q);
+    const c = await ensureConnected();
+    c?.sendText(q);
   }
 
   const live = conn === "connected" || conn === "reconnecting" || conn === "connecting";
   const busy = assistant === "searching" || assistant === "thinking" || assistant === "speaking" || assistant === "transcribing";
   const anyCloud = Object.values(props.localities).includes("cloud");
   const orbState = !live ? "idle" : userSpeaking ? "listening" : assistant;
-  const statusText = conn === "reconnecting" ? "Reconnecting…" : conn === "connecting" ? "Connecting…" : !live ? "Voice is off" : userSpeaking ? "Listening…" : STATE_LABEL[assistant];
+  const micBlocked = mic === "denied" || mic === "unavailable";
+  const statusText = conn === "reconnecting" ? "Reconnecting…" : conn === "connecting" ? "Connecting…" : !live ? "Voice is off" : userSpeaking ? "Listening…" : assistant === "idle" && micBlocked ? "Type your question below" : STATE_LABEL[assistant];
   const micText = mic === "on" ? "Microphone on" : mic === "denied" ? "Microphone blocked" : mic === "requesting" ? "Waiting for permission…" : mic === "unavailable" ? "Microphone unavailable" : "Microphone off";
   const suggestions = [props.collections.includes("General") ? "What products does VIH offer?" : null, ...props.collections.map((c) => SUGGESTIONS[c])].filter((x): x is string => !!x).slice(0, 4);
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const asked = new Set(turns.map((t) => t.question.toLowerCase()));
   const lastTurn = turns[turns.length - 1];
   const followUps = (() => {
@@ -302,10 +373,10 @@ export function VoiceConsole(props: {
   const toggleVoice = () => (live ? stop() : start());
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen supports-[height:100dvh]:h-dvh">
       {sidebarOpen && <div className="fixed inset-0 z-30 bg-black/60 backdrop-blur-sm md:hidden" onClick={() => setSidebarOpen(false)} />}
       {/* ── Sidebar ─────────────────────────────────────────── */}
-      <aside className={`${sidebarOpen ? "fixed inset-y-0 left-0 z-40 flex bg-vih-ink" : "hidden"} w-[272px] shrink-0 flex-col border-r hairline bg-black/30 md:static md:flex`}>
+      <aside data-dismissable={sidebarOpen ? "" : undefined} className={`${sidebarOpen ? "fixed inset-y-0 left-0 z-40 flex bg-vih-ink" : "hidden"} w-[272px] shrink-0 flex-col border-r hairline bg-black/30 md:static md:flex`}>
         <div className="flex h-16 items-center justify-between px-5">
           <Logo size={30} />
           <button className="rounded-lg p-1.5 text-white/50 hover:bg-white/5 md:hidden" aria-label="Close menu" onClick={() => setSidebarOpen(false)}><Icon.X /></button>
@@ -315,12 +386,12 @@ export function VoiceConsole(props: {
         </div>
         <div className="mt-6 flex items-center justify-between px-5">
           <p className="eyebrow">History</p>
-          {history.length > 0 && <button onClick={clearHistory} className="text-[11px] text-white/35 hover:text-rose-300">Clear all</button>}
+          {history.length > 0 && <button onClick={clearHistory} className="text-[11px] text-white/55 hover:text-rose-300">Clear all</button>}
         </div>
         <ul className="scroll-thin mt-2 flex-1 space-y-0.5 overflow-y-auto px-3 text-sm">
           {groups.map((g) => (
             <li key={g.label}>
-              <p className="px-2.5 pb-1 pt-2 text-[11px] font-medium text-white/30">{g.label}</p>
+              <p className="px-2.5 pb-1 pt-2 text-[11px] font-medium text-white/50">{g.label}</p>
               <ul className="space-y-0.5">
           {g.items.map((h) => (
             <li key={h.id} className="group relative">
@@ -328,7 +399,7 @@ export function VoiceConsole(props: {
                 <Icon.Chat width={15} height={15} className="shrink-0 text-white/35" />
                 <span className="truncate">{h.title ?? "Untitled"}</span>
               </button>
-              <button aria-label="Delete conversation" title="Delete" onClick={() => deleteConversation(h.id)} className="absolute right-1.5 top-1/2 hidden -translate-y-1/2 rounded-md p-1.5 text-white/40 hover:bg-white/10 hover:text-rose-300 group-hover:block">
+              <button type="button" aria-label={`Delete conversation: ${h.title ?? "Untitled"}`} title="Delete" onClick={() => deleteConversation(h.id)} className="absolute right-1.5 top-1/2 block -translate-y-1/2 rounded-md p-1.5 text-white/50 hover:bg-white/10 hover:text-rose-300 focus:block md:hidden md:group-hover:block md:group-focus-within:block">
                 <Icon.Trash />
               </button>
             </li>
@@ -351,6 +422,7 @@ export function VoiceConsole(props: {
             <div className="mb-3 grid grid-cols-2 gap-2">
               <Link href="/admin/documents" className="btn btn-ghost h-9 text-[13px]"><Icon.Doc width={15} height={15} /> Documents</Link>
               <Link href="/admin/metrics" className="btn btn-ghost h-9 text-[13px]"><Icon.Chart width={15} height={15} /> Metrics</Link>
+              <Link href="/admin/users" className="btn btn-ghost col-span-2 h-9 text-[13px]"><Icon.Shield width={15} height={15} /> Users &amp; access</Link>
             </div>
           )}
           <div className="flex items-center gap-3">
@@ -359,9 +431,11 @@ export function VoiceConsole(props: {
             </div>
             <div className="min-w-0 flex-1">
               <div className="truncate text-sm font-medium text-white">{props.user.name}</div>
-              <div className="text-xs text-faint">{props.user.role === "ADMIN" ? "Administrator" : "Member"}</div>
+              <div className="text-xs text-faint">
+                {props.user.role === "ADMIN" ? "Administrator" : "Member"} · <Link href="/account/password" className="underline hover:text-white">Change password</Link>
+              </div>
             </div>
-            <button title="Sign out" aria-label="Sign out" className="rounded-lg p-2 text-white/50 hover:bg-white/5 hover:text-white" onClick={async () => { await fetch("/api/auth/logout", { method: "POST" }); location.href = "/login"; }}>
+            <button title="Sign out" aria-label="Sign out" className="rounded-lg p-2 text-white/50 hover:bg-white/5 hover:text-white" onClick={async () => { await fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined); location.href = "/login"; }}>
               <Icon.LogOut />
             </button>
           </div>
@@ -387,10 +461,10 @@ export function VoiceConsole(props: {
           {turns.length > 0 && (
             <button aria-label="Export conversation" title="Export conversation (Markdown)" onClick={exportConversation} className="rounded-lg p-2 text-white/60 hover:bg-white/5 hover:text-white"><Icon.Upload className="rotate-180" /></button>
           )}
-          <div className="relative">
-            <button aria-label="Voice settings" onClick={() => setSettingsOpen((o) => !o)} className="rounded-lg p-2 text-white/60 hover:bg-white/5 hover:text-white"><Icon.Sliders /></button>
+          <div className="relative" ref={settingsRef}>
+            <button type="button" aria-label="Voice settings" aria-expanded={settingsOpen} aria-controls="voice-settings" onClick={() => setSettingsOpen((o) => !o)} className="rounded-lg p-2 text-white/60 hover:bg-white/5 hover:text-white"><Icon.Sliders /></button>
             {settingsOpen && (
-              <div className="glass absolute right-0 top-11 z-30 w-72 rounded-xl p-4 shadow-2xl shadow-black/60">
+              <div id="voice-settings" data-dismissable="" className="glass absolute right-0 top-11 z-30 w-72 rounded-xl p-4 shadow-2xl shadow-black/60">
                 <p className="eyebrow mb-3">Voice settings</p>
                 <label className="flex items-center justify-between text-sm text-white/80">
                   Spoken replies
@@ -398,7 +472,7 @@ export function VoiceConsole(props: {
                 </label>
                 <label className="mt-4 block text-sm text-white/80">
                   <span className="flex justify-between">Speaking speed <span className="tabular text-faint">{rate} wpm</span></span>
-                  <input type="range" min={120} max={260} step={10} value={rate} className="mt-2 w-full accent-violet-500" onChange={(e) => { const v = Number(e.target.value); setRate(v); clientRef.current?.updateConfig({ rateWpm: v }); }} />
+                  <input type="range" min={120} max={260} step={10} value={rate} aria-valuetext={`${rate} words per minute`} className="mt-2 w-full accent-violet-500" onChange={(e) => { const v = Number(e.target.value); setRate(v); clientRef.current?.updateConfig({ rateWpm: v }); }} />
                 </label>
                 <div className="mt-4 border-t hairline pt-3 text-[11px] leading-relaxed text-faint">
                   {Object.entries(props.providers).map(([k, v]) => <div key={k}><span className="uppercase text-white/40">{k}</span> · {v}</div>)}
@@ -410,22 +484,45 @@ export function VoiceConsole(props: {
 
         {error && (
           <div role="alert" className="mx-auto mt-4 flex w-full max-w-3xl items-start justify-between gap-3 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-2.5 text-sm text-rose-200">
-            <span>{error}</span>
-            <button className="text-rose-300 hover:text-white" onClick={() => setError(null)} aria-label="Dismiss"><Icon.X width={16} height={16} /></button>
+            <span>
+              {error.message}
+              {error.code === "SESSION_EXPIRED" && (
+                <>
+                  {" "}
+                  <a href="/login" className="font-medium underline hover:text-white">Sign in</a>
+                </>
+              )}
+            </span>
+            <button type="button" className="text-rose-300 hover:text-white" onClick={() => setError(null)} aria-label="Dismiss"><Icon.X width={16} height={16} /></button>
           </div>
         )}
 
-        <div ref={scrollRef} className="scroll-thin flex-1 overflow-y-auto" data-testid="transcript">
+        <div
+          ref={scrollRef}
+          className="scroll-thin flex-1 overflow-y-auto"
+          data-testid="transcript"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+          }}
+        >
           <div className="mx-auto w-full max-w-3xl space-y-7 px-4 py-8 sm:px-6">
             {!turns.length && !partial && (
               <div className="flex flex-col items-center pt-6 text-center">
                 <button onClick={toggleVoice} aria-label={live ? "End voice conversation" : "Start voice conversation"} className="group relative rounded-full focus-visible:outline-offset-8">
-                  <div className="orb h-28 w-28" data-state={orbState} style={{ transform: `scale(${1 + Math.min(0.18, level * 2.5)})` }} />
+                  <LiveOrb store={levelStore} state={orbState} className="h-28 w-28" maxGrow={0.18} gain={2.5} />
                   <span className="absolute inset-0 flex items-center justify-center text-white/90 opacity-80 transition group-hover:opacity-100">
                     {live ? <Icon.Stop width={26} height={26} /> : <Icon.Mic width={28} height={28} />}
                   </span>
                 </button>
-                <p className="mt-4 text-xs text-faint">{live ? (userSpeaking ? "Listening…" : "I'm listening — go ahead") : "Tap to talk"}</p>
+                <p className="mt-4 text-xs text-faint">
+                  {live && micBlocked ? (
+                    <>
+                      Microphone {mic === "denied" ? "blocked" : "unavailable"} — type below or{" "}
+                      <button type="button" className="underline hover:text-white" onClick={() => void clientRef.current?.startMic()}>try the mic again</button>
+                    </>
+                  ) : live ? (userSpeaking ? "Listening…" : "I'm listening — go ahead") : "Tap to talk"}
+                </p>
                 <h2 className="font-display mt-6 text-4xl font-semibold text-white">How can I help today?</h2>
                 <p className="mt-3 max-w-md text-[15px] leading-relaxed text-muted">Ask out loud or type below. Every answer comes from VIH documents with a source you can open.</p>
 
@@ -466,7 +563,7 @@ export function VoiceConsole(props: {
               </div>
             )}
             {turns.map((t) => (
-              <TurnView key={t.turnId} t={t} onSource={openSource} onRate={(r, c) => rateTurn(t, r, c)} />
+              <TurnView key={t.turnId} t={t} onSource={openSource} onRate={rateTurn} />
             ))}
             {followUps.length > 0 && !busy && (
               <div className="pl-10">
@@ -486,16 +583,20 @@ export function VoiceConsole(props: {
           </div>
         </div>
 
+        {/* Screen-reader announcements (visible status is hidden on small screens). */}
+        <div className="sr-only" role="status" aria-live="polite">{statusText}. {micText}.</div>
+        <div className="sr-only" aria-live="polite">{announcement}</div>
+
         {/* ── Voice dock ────────────────────────────────────── */}
         <div className="shrink-0 px-3 pb-4 sm:px-6 sm:pb-6">
           <div className="glass mx-auto flex w-full max-w-3xl items-center gap-3 rounded-2xl p-2.5 pl-3 shadow-2xl shadow-black/50">
             <div className="flex items-center gap-3 pr-1">
               <button onClick={toggleVoice} aria-label={live ? "End voice conversation" : "Start voice conversation"} title={live ? "End voice" : "Tap to talk"} className="rounded-full">
-                <div className="orb h-9 w-9 shrink-0" data-state={orbState} style={{ transform: `scale(${1 + Math.min(0.25, level * 3)})` }} />
+                <LiveOrb store={levelStore} state={orbState} className="h-9 w-9 shrink-0" maxGrow={0.25} gain={3} />
               </button>
-              {live && mic === "on" && <LevelBars level={level} active={userSpeaking} />}
+              {live && mic === "on" && <LevelBars store={levelStore} active={userSpeaking} />}
               <div className="hidden w-40 sm:block">
-                <div className="truncate text-[13px] font-medium text-white" data-testid="assistant-state" aria-live="polite">
+                <div className="truncate text-[13px] font-medium text-white" data-testid="assistant-state">
                   {statusText}
                   {(assistant === "thinking" || assistant === "searching" || assistant === "transcribing") && live && <span className="dots ml-1"><span /><span /><span /></span>}
                 </div>
@@ -515,6 +616,7 @@ export function VoiceConsole(props: {
               <button onClick={stop} className="btn btn-danger h-11 px-4" data-testid="stop"><Icon.Stop /> <span className="hidden sm:inline">End</span></button>
             )}
           </div>
+          <p className="mx-auto mt-2 max-w-3xl truncate text-center text-[11px] text-white/70 sm:hidden" aria-hidden>{statusText} · {micText}</p>
           <p className="mx-auto mt-2 max-w-3xl text-center text-[11px] text-faint">AI answers can be wrong — check the cited source for anything important. Press Esc to interrupt.</p>
         </div>
       </main>
@@ -543,9 +645,8 @@ export function VoiceConsole(props: {
                 }
                 setConsented(true);
                 setShowConsent(false);
-                const c = client();
-                await c.connect(null);
-                await c.startMic();
+                setError(null);
+                await begin(null);
               }}
             >
               <Icon.Mic /> Allow microphone & start
@@ -566,7 +667,9 @@ export function VoiceConsole(props: {
 
 const REASONS = ["Incorrect", "Incomplete", "Not what I asked", "Too slow"];
 
-function TurnView({ t, onSource, onRate }: { t: Turn; onSource: (s: SourceRef) => void; onRate: (r: 1 | -1, comment?: string) => void }) {
+/** Memoised: while one answer streams, earlier turns don't re-render (or re-parse their text). */
+const TurnView = memo(function TurnView({ t, onSource, onRate: rate }: { t: Turn; onSource: (s: SourceRef) => void; onRate: (t: Turn, r: 1 | -1, comment?: string) => Promise<boolean> }) {
+  const onRate = (r: 1 | -1, comment?: string) => rate(t, r, comment);
   const [open, setOpen] = useState(false);
   const [askWhy, setAskWhy] = useState(false);
   const [thanks, setThanks] = useState(false);
@@ -603,8 +706,8 @@ function TurnView({ t, onSource, onRate }: { t: Turn; onSource: (s: SourceRef) =
                 {t.messageId && (
                   <span className="ml-auto flex gap-1">
                     <CopyButton text={t.answer.replace(/\s*\[\d+(?:\s*,\s*\d+)*\]/g, "")} />
-                    <button aria-label="Helpful" className={`rounded-md p-1.5 transition ${t.feedback === 1 ? "bg-emerald-400/15 text-emerald-300" : "text-white/40 hover:bg-white/5 hover:text-white"}`} onClick={() => { onRate(1); setAskWhy(false); setThanks(true); }}><Icon.ThumbUp /></button>
-                    <button aria-label="Not helpful" className={`rounded-md p-1.5 transition ${t.feedback === -1 ? "bg-rose-400/15 text-rose-300" : "text-white/40 hover:bg-white/5 hover:text-white"}`} onClick={() => { onRate(-1); setAskWhy(true); setThanks(false); }}><Icon.ThumbDown /></button>
+                    <button type="button" aria-label="Helpful" aria-pressed={t.feedback === 1} className={`rounded-md p-1.5 transition ${t.feedback === 1 ? "bg-emerald-400/15 text-emerald-300" : "text-white/40 hover:bg-white/5 hover:text-white"}`} onClick={async () => { setAskWhy(false); setThanks(await onRate(1)); }}><Icon.ThumbUp /></button>
+                    <button type="button" aria-label="Not helpful" aria-pressed={t.feedback === -1} className={`rounded-md p-1.5 transition ${t.feedback === -1 ? "bg-rose-400/15 text-rose-300" : "text-white/40 hover:bg-white/5 hover:text-white"}`} onClick={async () => { setThanks(false); setAskWhy(await onRate(-1)); }}><Icon.ThumbDown /></button>
                   </span>
                 )}
               </div>
@@ -613,11 +716,11 @@ function TurnView({ t, onSource, onRate }: { t: Turn; onSource: (s: SourceRef) =
               <div className="mt-2.5 flex flex-wrap items-center gap-1.5 text-[12px]">
                 <span className="text-faint">What went wrong?</span>
                 {REASONS.map((r) => (
-                  <button key={r} onClick={() => { onRate(-1, r); setAskWhy(false); setThanks(true); }} className="rounded-full border hairline px-2.5 py-1 text-white/70 hover:border-rose-400/40 hover:text-white">{r}</button>
+                  <button key={r} onClick={async () => { setAskWhy(false); setThanks(await onRate(-1, r)); }} className="rounded-full border hairline px-2.5 py-1 text-white/70 hover:border-rose-400/40 hover:text-white">{r}</button>
                 ))}
               </div>
             )}
-            {thanks && <p className="mt-2 text-[12px] text-emerald-300/80">Thanks — your feedback helps improve answers.</p>}
+            {thanks && <p role="status" className="mt-2 text-[12px] text-emerald-300/80">Thanks — your feedback helps improve answers.</p>}
           </div>
           {t.sources.length > 0 && (
             <div className="mt-2.5" data-testid="sources">
@@ -644,22 +747,22 @@ function TurnView({ t, onSource, onRate }: { t: Turn; onSource: (s: SourceRef) =
       </div>
     </div>
   );
-}
+});
 
 function CopyButton({ text }: { text: string }) {
-  const [done, setDone] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
   return (
     <button
       aria-label="Copy answer"
       title="Copy answer"
       className="rounded-md px-2 py-1 text-[11px] text-white/45 transition hover:bg-white/5 hover:text-white"
       onClick={async () => {
-        await navigator.clipboard.writeText(text).catch(() => undefined);
-        setDone(true);
-        setTimeout(() => setDone(false), 1500);
+        const ok = await (navigator.clipboard?.writeText(text) ?? Promise.reject()).then(() => true, () => false);
+        setDone(ok ? "Copied" : "Copy failed");
+        setTimeout(() => setDone(null), 1500);
       }}
     >
-      {done ? "Copied" : "Copy"}
+      {done ?? "Copy"}
     </button>
   );
 }
@@ -681,7 +784,7 @@ function renderAnswer(text: string, sources: SourceRef[], onSource: (s: SourceRe
             const s = sources.find((x) => x.marker === Number(n.trim()));
             // Only markers that map to supplied evidence become source links; anything else is plain text.
             return s ? (
-              <button key={n} className="mx-0.5 inline-flex h-[18px] min-w-[18px] -translate-y-0.5 items-center justify-center rounded-[5px] px-1 align-middle text-[10.5px] font-bold text-white" style={{ background: "var(--vih-gradient)" }} onClick={() => onSource(s)} title={s.title}>
+              <button key={n} className="mx-0.5 inline-flex h-[18px] min-w-[18px] -translate-y-0.5 items-center justify-center rounded-[5px] px-1 align-middle text-[10.5px] font-bold text-white" style={{ background: "var(--vih-gradient)" }} onClick={() => onSource(s)} title={s.title} aria-label={`Source ${n.trim()}: ${s.title}`}>
                 {n.trim()}
               </button>
             ) : (
@@ -727,7 +830,37 @@ function LatencyChips({ m, mode }: { m: TurnMetricsView; mode: "voice" | "text" 
   );
 }
 
-function LevelBars({ level, active }: { level: number; active: boolean }) {
+type LevelStore = ReturnType<typeof createLevelStore>;
+
+/** Tiny external store for the mic level, read only by the meter components below. */
+function createLevelStore() {
+  let value = 0;
+  const subs = new Set<() => void>();
+  return {
+    get: () => value,
+    set(v: number) {
+      if (v === value) return;
+      value = v;
+      subs.forEach((f) => f());
+    },
+    subscribe(f: () => void) {
+      subs.add(f);
+      return () => void subs.delete(f);
+    },
+  };
+}
+
+function useLevel(store: LevelStore) {
+  return useSyncExternalStore(store.subscribe, store.get, () => 0);
+}
+
+function LiveOrb({ store, state, className, maxGrow, gain }: { store: LevelStore; state: string; className: string; maxGrow: number; gain: number }) {
+  const level = useLevel(store);
+  return <div className={`orb ${className}`} data-state={state} style={{ transform: `scale(${1 + Math.min(maxGrow, level * gain)})` }} />;
+}
+
+function LevelBars({ store, active }: { store: LevelStore; active: boolean }) {
+  const level = useLevel(store);
   const v = Math.min(1, level * 9);
   return (
     <div className="flex h-7 items-center gap-[3px]" aria-hidden>
@@ -738,17 +871,44 @@ function LevelBars({ level, active }: { level: number; active: boolean }) {
   );
 }
 
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"])';
+
 function Modal({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  const closeRef = useRef(onClose);
+  closeRef.current = onClose;
+  // Focus moves into the dialog, Tab stays inside it, and focus returns to the opener on close.
   useEffect(() => {
-    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const opener = document.activeElement as HTMLElement | null;
+    const items = () => Array.from(ref.current?.querySelectorAll<HTMLElement>(FOCUSABLE) ?? []);
+    (items().at(-1) ?? ref.current)?.focus();
+    const k = (e: KeyboardEvent) => {
+      if (e.key === "Escape") return closeRef.current();
+      if (e.key !== "Tab") return;
+      const els = items();
+      if (!els.length) return;
+      const first = els[0];
+      const last = els[els.length - 1];
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
     window.addEventListener("keydown", k);
-    return () => window.removeEventListener("keydown", k);
-  }, [onClose]);
+    return () => {
+      window.removeEventListener("keydown", k);
+      opener?.focus?.();
+    };
+  }, []);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" onClick={onClose}>
-      <div role="dialog" aria-modal="true" aria-label={title} className="glass max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-vih-panel/90 p-6 shadow-2xl shadow-black/60" onClick={(e) => e.stopPropagation()}>
+      <div ref={ref} tabIndex={-1} role="dialog" aria-modal="true" aria-labelledby={titleId} className="glass max-h-[80vh] w-full max-w-lg overflow-y-auto rounded-2xl bg-vih-panel/90 p-6 shadow-2xl shadow-black/60" onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-start justify-between gap-4">
-          <h3 className="font-display text-xl font-semibold text-white">{title}</h3>
+          <h3 id={titleId} className="font-display text-xl font-semibold text-white">{title}</h3>
           <button onClick={onClose} aria-label="Close" className="rounded-lg p-1 text-white/40 hover:bg-white/5 hover:text-white"><Icon.X /></button>
         </div>
         {children}

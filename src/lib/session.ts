@@ -11,6 +11,8 @@ export interface AuthUser {
   email: string;
   name: string;
   role: "ADMIN" | "MEMBER";
+  /** Signed in with an admin-issued temporary password: only the password-change flow is allowed. */
+  mustChangePassword?: boolean;
 }
 
 export async function issueSessionToken(userId: string) {
@@ -24,14 +26,19 @@ export async function userFromToken(token: string | undefined): Promise<AuthUser
   if (!token) return null;
   const s = await prisma.session.findUnique({ where: { tokenHash: sha256(token) }, include: { user: true } });
   if (!s || s.expiresAt < new Date() || s.user.disabled) return null;
-  return { id: s.user.id, email: s.user.email, name: s.user.name, role: s.user.role };
+  return { id: s.user.id, email: s.user.email, name: s.user.name, role: s.user.role, mustChangePassword: s.user.mustChangePassword };
 }
 
 export function tokenFromCookieHeader(header: string | undefined): string | undefined {
   if (!header) return undefined;
   for (const part of header.split(";")) {
     const [k, ...v] = part.trim().split("=");
-    if (k === SESSION_COOKIE) return decodeURIComponent(v.join("="));
+    if (k !== SESSION_COOKIE) continue;
+    try {
+      return decodeURIComponent(v.join("="));
+    } catch {
+      return undefined; // malformed cookie: treat as signed out
+    }
   }
   return undefined;
 }

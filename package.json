@@ -2,7 +2,7 @@
   "name": "vih-voicerag",
   "version": "0.1.0",
   "private": true,
-  "description": "VIH VoiceRAG \u2014 low-latency, permission-aware voice assistant over an internal knowledge base",
+  "description": "VIH VoiceRAG — low-latency, permission-aware voice assistant over an internal knowledge base",
   "scripts": {
     "dev": "tsx watch --clear-screen=false --ignore './.next/**' --ignore './storage/**' server.ts",
     "build": "prisma generate && next build",
@@ -19,6 +19,7 @@
     "db:migrate": "prisma migrate dev",
     "db:deploy": "prisma migrate deploy",
     "db:seed": "tsx prisma/seed.ts",
+    "admin:create": "tsx scripts/admin-create.ts",
     "seed:docs": "tsx scripts/make-seed-docs.ts",
     "eval:rag": "tsx scripts/eval-rag.ts",
     "bench:voice": "tsx scripts/bench-voice.ts",

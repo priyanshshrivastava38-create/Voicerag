@@ -9,9 +9,21 @@ const g = globalThis as unknown as { __ready?: { ready: boolean; warmupMs: numbe
 
 export function setReady(ready: boolean, warmupMs: number | null) {
   g.__ready = { ready, warmupMs, since: Date.now() };
+  cached = null; // a state change (warm-up done, shutdown) is visible immediately
 }
 
-export async function readiness() {
+// /api/ready is polled by load balancers and uptime checks; probing every provider (including a
+// paid cloud LLM) on each poll is wasteful, so results are reused briefly.
+const READY_TTL_MS = 5_000;
+let cached: { at: number; value: Promise<Awaited<ReturnType<typeof computeReadiness>>> } | null = null;
+
+export function readiness() {
+  const now = Date.now();
+  if (!cached || now - cached.at > READY_TTL_MS) cached = { at: now, value: computeReadiness() };
+  return cached.value;
+}
+
+async function computeReadiness() {
   const state = g.__ready ?? { ready: false, warmupMs: null, since: Date.now() };
   let db = false;
   try {

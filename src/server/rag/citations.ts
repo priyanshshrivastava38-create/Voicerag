@@ -44,7 +44,22 @@ export function tidyAnswer(text: string): string {
 }
 
 /**
- * Lexical support check used by the RAG eval (not on the hot path): fraction of answer sentences
+ * Verification for answers generated from BORDERLINE evidence (a plausible but not clearly strong
+ * match), where a small model is most likely to misapply or invent. Accept only an answer that
+ * cites a supplied passage, whose every sentence is lexically supported by the passages it cites,
+ * and whose every number appears in those passages. Anything else is replaced by an abstention.
+ */
+export function verifyBorderlineAnswer(answer: string, passages: Map<number, string>): boolean {
+  const cited = citedMarkers(answer, passages.size);
+  if (!cited.length) return false;
+  if (supportedSentenceRatio(answer, passages) < 1) return false;
+  const source = cited.map((m) => passages.get(m) ?? "").join(" ").replace(/,(?=\d{3})/g, "");
+  const numbers = speakable(answer, passages.size).replace(/,(?=\d{3})/g, "").match(/\d+(?:\.\d+)?/g) ?? [];
+  return numbers.every((n) => new RegExp(`(^|\\D)${n.replace(".", "\\.")}(\\D|$)`).test(source));
+}
+
+/**
+ * Lexical support check used by the RAG eval and the borderline gate: fraction of answer sentences
  * whose content words are mostly present in the passages they cite. A heuristic, reported as such.
  */
 export function supportedSentenceRatio(answer: string, passages: Map<number, string>): number {

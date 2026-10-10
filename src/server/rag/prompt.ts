@@ -6,12 +6,62 @@ import type { ChatMessage } from "../providers/types";
 import type { Evidence } from "./retrieve";
 
 export const ABSTAIN_TEXT = "I don't have enough information in the knowledge base to answer that. You could try rephrasing, or ask someone who owns that policy.";
-/** Greetings, thanks and "what can you do" — not knowledge questions, so don't answer "not found". */
+export type SmallTalk = "greeting" | "thanks" | "bye" | "ack" | "help";
+
+function conversational(question: string) {
+  return question.toLowerCase().replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+// Optional lead-in and tail words people add when they're being polite ("ok thanks bro").
+const LEAD = "(?:(?:ok|okay|oh|great|cool|perfect|awesome|nice|alright|right|got it|that's (?:great|helpful|perfect)|that helps|well) )*";
+const TAIL = "(?: (?:there|bro|buddy|mate|assistant|so much|very much|a lot|a ton|again|then|now|for (?:the|your) help|for that|everyone))*";
+
+/** Greetings, thanks, goodbyes and "what can you do": not knowledge questions, so never "not found". */
+export function smallTalkKind(question: string): SmallTalk | null {
+  const q = conversational(question);
+  if (!q) return null;
+  const whole = (alts: string) => new RegExp(`^${LEAD}(?:${alts})${TAIL}$`).test(q);
+  if (whole("thanks|thank you|thank u|thx|ty|cheers|much appreciated|appreciate it")) return "thanks";
+  if (whole("bye|bye bye|goodbye|good bye|good night|see you(?: later| soon| tomorrow| around)?|see ya|later|talk (?:to you )?later|have a (?:good|nice|great) (?:day|one|evening|weekend)|that's all|that's it|i'm done|nothing else")) return "bye";
+  if (whole("hi|hello|hey|hiya|yo|good (?:morning|afternoon|evening)|how are you(?: doing)?|how's it going|what's up")) return "greeting";
+  if (whole("ok|okay|cool|great|got it|alright|nice|perfect|awesome|right|sure|fine|i see|understood|makes sense")) return "ack";
+  if (/\b(what can you (do|help)|what do you know|how (can|do) (you|i) (help|use)|who are you|what are you|what can i ask|help me)\b/.test(q)) return "help";
+  return null;
+}
+
 export function isSmallTalk(question: string): boolean {
-  const q = question.toLowerCase().replace(/[^a-z' ]/g, " ").replace(/\s+/g, " ").trim();
-  if (!q) return false;
-  if (/^(hi|hello|hey|hiya|yo|good (morning|afternoon|evening)|thanks|thank you|ok|okay|cool|great|bye|goodbye)( there| bro| assistant| so much)?$/.test(q)) return true;
-  return /\b(what can you (do|help)|what do you know|how (can|do) (you|i) (help|use)|who are you|what are you|what can i ask|help me)\b/.test(q);
+  return smallTalkKind(question) !== null;
+}
+
+/** Short canned reply for small talk (no LLM call). */
+export function smallTalkReply(kind: SmallTalk, names: string[] = []): string {
+  switch (kind) {
+    case "thanks":
+      return "You're welcome! Ask me anything else whenever you like.";
+    case "bye":
+      return "Goodbye! Come back any time you have a question.";
+    case "ack":
+      return "Anything else you'd like to know?";
+    default:
+      return greetingText(names);
+  }
+}
+
+/**
+ * Does this read as a request for information? Used to keep the general-guidance path (an LLM call
+ * without documents) for real questions, not stray remarks or speech picked up from the room.
+ */
+export function looksLikeQuestion(question: string): boolean {
+  const q = conversational(question);
+  if (/\?\s*$/.test(question.trim())) return true;
+  return /^(?:(?:so|and|but|ok|okay|hey|please|um|uh|also|then) )*(?:what|what's|whats|how|why|when|where|who|which|whose|whom|can|could|should|would|will|is|are|am|was|were|do|does|did|may|might|shall|have|has|explain|describe|tell|give|show|list|help|suggest|recommend|compare|define|summari[sz]e|i need|i want|i'd like|i'm looking|is there|are there)\b/.test(q);
+}
+
+/** Reply when the input doesn't look like a question (often speech picked up from the room). */
+export function notAQuestionText(names: string[] = []) {
+  return names.length
+    ? `Sorry, I didn't catch a question there. Could you say that again? I can help with ${topicList(names)} topics.`
+    : "Sorry, I didn't catch a question there. Could you say that again?";
 }
 
 function topicList(names: string[]) {
@@ -95,7 +145,7 @@ export function buildMessages(question: string, evidence: Evidence[], history: C
     ...recent,
     {
       role: "user",
-      content: `Evidence passages:\n\n${evidenceBlock(evidence)}\n\nQuestion: ${question}\n\nAnswer in one to three short spoken sentences with [n] citations, using only the evidence above.`,
+      content: `Evidence passages:\n\n${evidenceBlock(evidence)}\n\nQuestion: ${question}\n\nAnswer in one to three short spoken sentences, citing passage numbers like [1], using only the evidence above.`,
     },
   ];
 }
@@ -137,5 +187,5 @@ export function retrievalQuery(question: string, history: ChatMessage[]): string
 }
 
 export function isAbstention(text: string): boolean {
-  return /don'?t have enough information|not (?:covered|mentioned|specified) in the (?:evidence|knowledge base|documents)|cannot find .* in the knowledge base/i.test(text);
+  return /don'?t have enough information|not (?:covered|mentioned|specified) in the (?:evidence|knowledge base|documents)|cannot find .* in the knowledge base|(?:evidence|passages?|documents?|knowledge base)(?: provided)? (?:does not|doesn't|do not|don't) (?:mention|say|specify|cover|include|state|contain)|doesn'?t mention .* in the (?:provided )?(?:evidence|passages)/i.test(text);
 }

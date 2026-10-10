@@ -39,6 +39,8 @@ model User {
   passwordHash String
   role         Role          @default(MEMBER)
   disabled     Boolean       @default(false)
+  /// Set for admin-issued temporary passwords; the user must choose their own before using the app.
+  mustChangePassword Boolean @default(false)
   createdAt    DateTime      @default(now())
   sessions     Session[]
   groups       GroupMember[]
@@ -55,6 +57,7 @@ model Session {
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([expiresAt])
 }
 
 /// A department / team. Collections are granted to groups, never directly to users.

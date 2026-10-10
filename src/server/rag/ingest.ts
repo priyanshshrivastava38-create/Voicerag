@@ -115,9 +115,9 @@ export async function processVersion(versionId: string): Promise<void> {
 }
 
 /** Process queued work until the queue is empty. Returns the number of versions processed. */
-export async function drainQueue(max = 100): Promise<number> {
+export async function drainQueue(max = 100, shouldStop: () => boolean = () => false): Promise<number> {
   let n = 0;
-  while (n < max) {
+  while (n < max && !shouldStop()) {
     const job = await claimNext();
     if (!job) break;
     await processVersion(job.id);
@@ -126,15 +126,18 @@ export async function drainQueue(max = 100): Promise<number> {
   return n;
 }
 
-/** Long-running poll loop (in-process or `npm run worker`). */
-export function startWorker(intervalMs = 1500) {
+/**
+ * Long-running poll loop (in-process or `npm run worker`). The returned stop function resolves once
+ * the job in progress (if any) has finished, so a shutdown never leaves a version stuck in PROCESSING.
+ */
+export function startWorker(intervalMs = 1500): () => Promise<void> {
   let stopped = false;
   let running = false;
   const tick = async () => {
     if (stopped || running) return;
     running = true;
     try {
-      await drainQueue();
+      await drainQueue(100, () => stopped);
     } catch (e) {
       console.error("[ingest] worker error:", redactString(String(e)));
     } finally {
@@ -143,8 +146,9 @@ export function startWorker(intervalMs = 1500) {
   };
   const id = setInterval(tick, intervalMs);
   void tick();
-  return () => {
+  return async () => {
     stopped = true;
     clearInterval(id);
+    while (running) await new Promise((r) => setTimeout(r, 50));
   };
 }

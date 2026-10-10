@@ -19,6 +19,7 @@ export async function authorizeUpgrade(req: IncomingMessage, query: Record<strin
   }
   const user = await userFromToken(tokenFromCookieHeader(req.headers.cookie));
   if (!user) return { ok: false, status: 401, reason: "Unauthorized" };
+  if (user.mustChangePassword) return { ok: false, status: 403, reason: "Password Change Required" };
   if (!VoiceSession.canOpen(user.id)) return { ok: false, status: 429, reason: "Too Many Sessions" };
   // Benchmark runs are tagged so dashboards never mix them with live traffic.
   const source = query.source === "benchmark" && user.role === "ADMIN" ? "benchmark" : "live";

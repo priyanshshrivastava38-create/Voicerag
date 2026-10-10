@@ -22,14 +22,24 @@ function build(): Providers {
   // A cloud LLM selected without its key falls back to the local model (logged and shown in the UI
   // provider list), so the app keeps working until the key is added and the server restarted.
   const missingKey = (env.llmProvider === "anthropic" && !env.anthropicKey) || (env.llmProvider === "openai" && !env.openaiKey) || (env.llmProvider === "gemini" && !env.geminiKey);
+  // In production a missing key is a deployment error, not something to paper over with a much
+  // weaker model that real users would get without anyone noticing.
+  if (missingKey && env.isProduction && process.env.LLM_ALLOW_LOCAL_FALLBACK !== "true") {
+    throw new Error(`LLM_PROVIDER=${env.llmProvider} but its API key is not set. Set the key in the environment (or LLM_ALLOW_LOCAL_FALLBACK=true to knowingly use local Ollama ${env.llmFallbackModel || "(none)"}).`);
+  }
   if (missingKey && env.llmFallbackModel) {
     console.warn(`> LLM_PROVIDER=${env.llmProvider} but its API key is not set: using local Ollama ${env.llmFallbackModel} until it is.`);
     llm = () => new OllamaLlm(env.llmFallbackModel);
   }
   const embed = ({ ollama: () => new OllamaEmbed(), openai: () => new OpenAiCompatibleEmbed(), mock: () => new MockEmbed(env.embedDim) } as const)[env.embedProvider as "mock"];
   const tts = ({ piper: () => new PiperTts(), openai: () => new OpenAiCompatibleTts(), mock: () => new MockTts(), browser: () => null } as const)[env.ttsProvider as "mock"];
-  const missing = [!stt && `STT_PROVIDER=${env.sttProvider}`, !llm && `LLM_PROVIDER=${env.llmProvider}`, !embed && `EMBED_PROVIDER=${env.embedProvider}`, tts === undefined && `TTS_PROVIDER=${env.ttsProvider}`].filter(Boolean);
-  if (missing.length) throw new Error(`Unknown provider configuration: ${missing.join(", ")}`);
+  const missing = [
+    !stt && `STT_PROVIDER=${env.sttProvider} (expected whispercpp | openai | mock)`,
+    !llm && `LLM_PROVIDER=${env.llmProvider} (expected ollama | anthropic | gemini | openai | mock)`,
+    !embed && `EMBED_PROVIDER=${env.embedProvider} (expected ollama | openai | mock)`,
+    tts === undefined && `TTS_PROVIDER=${env.ttsProvider} (expected piper | openai | browser | mock)`,
+  ].filter(Boolean);
+  if (missing.length) throw new Error(`Unknown provider configuration: ${missing.join("; ")}. See .env.example.`);
   const p: Providers = { stt: stt(), llm: llm(), embed: embed(), tts: tts() };
   // VOICERAG_ALLOW_MOCK_PROVIDERS exists only for the browser E2E suite (production build + mocks).
   if (env.isProduction && process.env.VOICERAG_ALLOW_MOCK_PROVIDERS !== "true") {
