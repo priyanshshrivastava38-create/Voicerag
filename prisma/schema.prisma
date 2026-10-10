@@ -1,0 +1,314 @@
+// VIH VoiceRAG — application schema.
+// Vector (pgvector) and full-text (tsvector) columns on Chunk are managed by raw SQL in the
+// migrations (Prisma has no native type for them) and accessed with $queryRaw in src/server/rag.
+
+generator client {
+  provider        = "prisma-client-js"
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN // manages collections, documents, users; sees operational metrics
+  MEMBER // converses with collections granted to their groups
+}
+
+enum DocStatus {
+  QUEUED
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum MessageRole {
+  USER
+  ASSISTANT
+}
+
+// ---------------------------------------------------------------------------
+// Identity & access
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String        @id @default(cuid())
+  email        String        @unique
+  name         String
+  passwordHash String
+  role         Role          @default(MEMBER)
+  disabled     Boolean       @default(false)
+  createdAt    DateTime      @default(now())
+  sessions     Session[]
+  groups       GroupMember[]
+  conversations Conversation[]
+  feedback     Feedback[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  tokenHash String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+/// A department / team. Collections are granted to groups, never directly to users.
+model Group {
+  id          String            @id @default(cuid())
+  name        String            @unique
+  members     GroupMember[]
+  grants      CollectionGrant[]
+  createdAt   DateTime          @default(now())
+}
+
+model GroupMember {
+  groupId String
+  userId  String
+  group   Group  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([groupId, userId])
+  @@index([userId])
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge
+// ---------------------------------------------------------------------------
+
+model Collection {
+  id          String            @id @default(cuid())
+  slug        String            @unique
+  name        String
+  department  String?
+  description String?
+  createdAt   DateTime          @default(now())
+  grants      CollectionGrant[]
+  documents   Document[]
+}
+
+model CollectionGrant {
+  collectionId String
+  groupId      String
+  collection   Collection @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  group        Group      @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@id([collectionId, groupId])
+  @@index([groupId])
+}
+
+model Document {
+  id               String            @id @default(cuid())
+  collectionId     String
+  collection       Collection        @relation(fields: [collectionId], references: [id], onDelete: Restrict)
+  title            String
+  filename         String
+  mimeType         String
+  currentVersionId String?           @unique
+  currentVersion   DocumentVersion?  @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  versions         DocumentVersion[] @relation("Versions")
+  createdById      String?
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+  deletedAt        DateTime?
+
+  @@index([collectionId, deletedAt])
+}
+
+/// One uploaded revision. Doubles as the ingestion job record: the worker claims QUEUED rows
+/// with FOR UPDATE SKIP LOCKED, so concurrent workers never process the same version twice.
+model DocumentVersion {
+  id             String    @id @default(cuid())
+  documentId     String
+  document       Document  @relation("Versions", fields: [documentId], references: [id], onDelete: Cascade)
+  currentOf      Document? @relation("CurrentVersion")
+  version        Int
+  contentHash    String
+  sizeBytes      Int
+  storagePath    String
+  status         DocStatus @default(QUEUED)
+  error          String?
+  attempts       Int       @default(0)
+  lockedAt       DateTime?
+  chunkCount     Int       @default(0)
+  pageCount      Int?
+  embeddingModel String?
+  createdAt      DateTime  @default(now())
+  indexedAt      DateTime?
+  chunks         Chunk[]
+
+  @@unique([documentId, version])
+  @@unique([documentId, contentHash])
+  @@index([status, createdAt])
+}
+
+/// Retrieval unit. `embedding vector(N)` and generated `tsv tsvector` columns are added by
+/// raw SQL migration. collectionId/documentId are denormalised so the permission filter is a
+/// single indexed predicate inside the similarity query.
+model Chunk {
+  id           String          @id @default(cuid())
+  versionId    String
+  version      DocumentVersion @relation(fields: [versionId], references: [id], onDelete: Cascade)
+  documentId   String
+  collectionId String
+  ordinal      Int
+  text         String
+  headingPath  String?
+  pageStart    Int?
+  pageEnd      Int?
+  contentHash  String
+  active       Boolean         @default(false)
+  embedding    Unsupported("vector(768)")?
+  tsv          Unsupported("tsvector")?
+  citations    Citation[]
+
+  @@unique([versionId, ordinal])
+  @@index([collectionId, active])
+  @@index([documentId])
+}
+
+/// Embeddings keyed by chunk content hash + embedding model, so re-indexing unchanged text
+/// (retries, re-uploads, re-index requests) never calls the embedding provider again.
+/// `embedding` column is added by raw SQL migration.
+model EmbeddingCache {
+  contentHash String
+  model       String
+  embedding   Unsupported("vector(768)")
+  createdAt   DateTime @default(now())
+
+  @@id([contentHash, model])
+}
+
+/// Single-row monotonic counter bumped whenever the searchable index changes.
+/// Part of every retrieval cache key, so cached results never outlive an update or delete.
+model IndexState {
+  id      Int @id @default(1)
+  version Int @default(1)
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+
+model Conversation {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  messages  Message[]
+
+  @@index([userId, updatedAt])
+}
+
+model Message {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  role           MessageRole
+  text           String
+  turnId         String?
+  abstained      Boolean      @default(false)
+  interrupted    Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  citations      Citation[]
+  feedback       Feedback[]
+
+  @@index([conversationId, createdAt])
+}
+
+model Citation {
+  id         String  @id @default(cuid())
+  messageId  String
+  message    Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  chunkId    String?
+  chunk      Chunk?  @relation(fields: [chunkId], references: [id], onDelete: SetNull)
+  documentId String
+  docTitle   String
+  marker     Int
+  page       Int?
+  heading    String?
+  excerpt    String
+  score      Float
+
+  @@index([messageId])
+}
+
+model Feedback {
+  id        String   @id @default(cuid())
+  messageId String
+  message   Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rating    Int // +1 / -1
+  comment   String?
+  createdAt DateTime @default(now())
+
+  @@unique([messageId, userId])
+}
+
+// ---------------------------------------------------------------------------
+// Operations
+// ---------------------------------------------------------------------------
+
+/// One row per conversational turn. "eos" = the moment the server receives the end-of-turn
+/// decision; stage durations are server monotonic-clock milliseconds relative to it.
+/// clientEosToFirstAudioMs is measured by the browser on its own clock from the LAST VOICED
+/// microphone frame to the first assistant sample scheduled for playback, so it includes the
+/// VAD hangover (vadHangoverMs) — it is the user-perceived latency.
+model TurnMetric {
+  id                      String   @id @default(cuid())
+  turnId                  String   @unique
+  userId                  String?
+  conversationId          String?
+  mode                    String // voice | text
+  source                  String   @default("live") // live | benchmark | synthetic-load
+  coldStart               Boolean  @default(false)
+  providers               Json
+  outcome                 String // answered | abstained | cancelled | error | timeout
+  errorCode               String?
+  speechMs                Int?
+  vadHangoverMs           Int?
+  sttMs                   Int?
+  firstPartialMs          Int?
+  eosToTranscriptMs       Int?
+  retrievalMs             Int?
+  eosToEvidenceMs         Int?
+  eosToFirstTokenMs       Int?
+  llmTtftMs               Int?
+  eosToFirstAudioMs       Int?
+  ttsFirstChunkMs         Int?
+  clientEosToFirstAudioMs Int?
+  speechStartToFirstAudioMs Int?
+  totalMs                 Int?
+  retrievalCacheHit       Boolean?
+  speculativeHit          Boolean?
+  evidenceCount           Int?
+  topScore                Float?
+  inputTokens             Int?
+  outputTokens            Int?
+  costUsd                 Float?
+  marks                   Json?
+  createdAt               DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([source, createdAt])
+}
+
+model AuditEvent {
+  id         String   @id @default(cuid())
+  actorId    String?
+  action     String
+  targetType String?
+  targetId   String?
+  details    Json?
+  createdAt  DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+}

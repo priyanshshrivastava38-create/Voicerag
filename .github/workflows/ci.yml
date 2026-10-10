@@ -1,0 +1,48 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.1-pg16
+        env:
+          POSTGRES_USER: voicerag
+          POSTGRES_PASSWORD: voicerag
+          POSTGRES_DB: vih_voicerag_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U voicerag" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://voicerag:voicerag@localhost:5432/vih_voicerag_test?schema=public
+      DATABASE_URL_TEST: postgresql://voicerag:voicerag@localhost:5432/vih_voicerag_test?schema=public
+      # CI never calls real providers: unit/integration/E2E suites use deterministic mocks.
+      STT_PROVIDER: mock
+      LLM_PROVIDER: mock
+      TTS_PROVIDER: mock
+      EMBED_PROVIDER: mock
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx prisma migrate deploy
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run seed:docs
+      - run: npm test
+      - run: npm run build
+        env:
+          VOICERAG_ALLOW_MOCK_PROVIDERS: "true"
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-report
+          path: playwright-report/

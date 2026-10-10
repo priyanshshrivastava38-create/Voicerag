@@ -1,0 +1,70 @@
+{
+  "name": "vih-voicerag",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VIH VoiceRAG \u2014 low-latency, permission-aware voice assistant over an internal knowledge base",
+  "scripts": {
+    "dev": "tsx watch --clear-screen=false --ignore './.next/**' --ignore './storage/**' server.ts",
+    "build": "prisma generate && next build",
+    "start": "NODE_ENV=production tsx server.ts",
+    "worker": "tsx scripts/worker.ts",
+    "stt:server": "bash scripts/stt-server.sh",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run tests/unit tests/integration",
+    "test:unit": "vitest run tests/unit",
+    "test:integration": "vitest run tests/integration",
+    "test:providers": "vitest run tests/providers",
+    "test:e2e": "playwright test",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:seed": "tsx prisma/seed.ts",
+    "seed:docs": "tsx scripts/make-seed-docs.ts",
+    "eval:rag": "tsx scripts/eval-rag.ts",
+    "bench:voice": "tsx scripts/bench-voice.ts",
+    "bench:load": "tsx scripts/bench-load.ts",
+    "retention:purge": "tsx scripts/retention-purge.ts",
+    "postinstall": "prisma generate",
+    "tts:server": "bash scripts/tts-server.sh",
+    "sidecars": "bash -c \"trap 'kill 0' EXIT; bash scripts/stt-server.sh & bash scripts/tts-server.sh & wait\""
+  },
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.129.0",
+    "@prisma/client": "6.19.3",
+    "mammoth": "1.13.0",
+    "next": "15.5.27",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "tsx": "4.23.15",
+    "unpdf": "1.8.1",
+    "ws": "8.22.0",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3",
+    "@playwright/test": "1.64.0",
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "^22",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "@types/ws": "8.18.2",
+    "docx": "9.9.0",
+    "eslint": "9.39.5",
+    "eslint-config-next": "15.5.27",
+    "pdf-lib": "1.17.1",
+    "prisma": "6.19.3",
+    "tailwindcss": "4.3.3",
+    "typescript": "5.9.3",
+    "vitest": "3.2.7"
+  },
+  "allowScripts": {
+    "@prisma/client@6.19.3": true,
+    "prisma@6.19.3": true,
+    "unrs-resolver@1.12.2": true,
+    "@prisma/engines@6.19.3": true,
+    "esbuild@0.28.2": true
+  }
+}
