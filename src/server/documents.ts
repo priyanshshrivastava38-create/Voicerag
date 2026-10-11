@@ -1,7 +1,5 @@
 // Knowledge management: collections, uploads, re-indexing, deletion. Admin-only mutations;
 // members can list documents in collections granted to them (for source viewing).
-import fs from "node:fs/promises";
-import path from "node:path";
 import { prisma } from "@/lib/db";
 import type { AuthUser } from "@/lib/auth";
 import { requireAdmin } from "@/lib/auth";
@@ -13,6 +11,7 @@ import { audit } from "./audit";
 import { bumpIndexVersion } from "./rag/index-state";
 import { clearRetrievalCache } from "./rag/retrieve";
 import { MIME, sanitizeFilename, validateUpload } from "./rag/validate";
+import { removeStoredFile, storeFile } from "./storage";
 
 export async function listCollections(user: AuthUser) {
   const scope = await scopeFor(user.id);
@@ -63,16 +62,6 @@ export async function listDocuments(user: AuthUser, collectionId?: string) {
   });
 }
 
-async function store(buf: Buffer, hash: string, filename: string) {
-  // Content-addressed, outside the web root, never served statically.
-  const dir = path.join(env.storageDir, "documents", hash.slice(0, 2));
-  await fs.mkdir(dir, { recursive: true, mode: 0o700 });
-  const ext = path.extname(filename).toLowerCase();
-  const p = path.join(dir, `${hash}${ext}`);
-  await fs.writeFile(p, buf, { mode: 0o600 });
-  return p;
-}
-
 /**
  * Create a document, or a new version when `documentId` is given. Idempotent: uploading the same
  * bytes again for the same document returns the existing version instead of re-indexing.
@@ -92,7 +81,7 @@ export async function uploadDocument(user: AuthUser, input: { collectionId: stri
     if (doc.collectionId !== input.collectionId) throw badRequest("A new version must stay in the same collection.");
     const existing = await prisma.documentVersion.findUnique({ where: { documentId_contentHash: { documentId: doc.id, contentHash: hash } } });
     if (existing) return { documentId: doc.id, versionId: existing.id, duplicate: true };
-    const storagePath = await store(input.data, hash, filename);
+    const storagePath = await storeFile(input.data, hash, filename);
     const v = await prisma.$transaction(async (tx) => {
       const last = await tx.documentVersion.aggregate({ where: { documentId: doc.id }, _max: { version: true } });
       await tx.document.update({ where: { id: doc.id }, data: { filename, mimeType: MIME[kind] } });
@@ -105,7 +94,7 @@ export async function uploadDocument(user: AuthUser, input: { collectionId: stri
   // Same bytes already live in this collection → do not create a duplicate document.
   const dup = await prisma.documentVersion.findFirst({ where: { contentHash: hash, document: { collectionId: collection.id, deletedAt: null } }, select: { id: true, documentId: true } });
   if (dup) return { documentId: dup.documentId, versionId: dup.id, duplicate: true };
-  const storagePath = await store(input.data, hash, filename);
+  const storagePath = await storeFile(input.data, hash, filename);
   const doc = await prisma.document.create({
     data: { collectionId: collection.id, title, filename, mimeType: MIME[kind], createdById: user.id, versions: { create: { version: 1, contentHash: hash, sizeBytes: input.data.length, storagePath } } },
     include: { versions: true },
@@ -145,7 +134,7 @@ export async function deleteDocument(user: AuthUser, documentId: string) {
   clearRetrievalCache();
   for (const v of doc.versions) {
     const shared = await prisma.documentVersion.count({ where: { storagePath: v.storagePath, document: { deletedAt: null } } });
-    if (!shared) await fs.rm(v.storagePath, { force: true });
+    if (!shared) await removeStoredFile(v.storagePath);
   }
   await audit({ actorId: user.id, action: "document.deleted", targetType: "Document", targetId: doc.id, details: { versions: doc.versions.length } });
   return { ok: true };

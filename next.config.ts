@@ -1,8 +1,10 @@
 import type { NextConfig } from "next";
 
 const isProd = process.env.NODE_ENV === "production";
+// Split hosting (docs/DEPLOY-VERCEL.md): the voice WebSocket lives on another origin.
+const voiceWs = (process.env.NEXT_PUBLIC_VOICE_WS_URL ?? "").trim().replace(/\/$/, "");
 
-// Everything is same-origin: the voice WebSocket, the audio worklet and the self-hosted fonts.
+// Everything is same-origin (except a split-hosted voice server): the voice WebSocket, the audio worklet and the self-hosted fonts.
 // Next.js injects inline bootstrap scripts, hence 'unsafe-inline' (a nonce-based CSP via middleware
 // is the stricter follow-up); dev mode additionally needs eval for fast refresh.
 const csp = [
@@ -12,7 +14,7 @@ const csp = [
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "media-src 'self' blob:",
-  "connect-src 'self'",
+  `connect-src 'self'${voiceWs ? ` ${voiceWs}` : ""}`,
   "worker-src 'self' blob:",
   "frame-ancestors 'none'",
   "base-uri 'self'",

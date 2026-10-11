@@ -43,6 +43,27 @@ export const env = {
   get secureCookies() {
     return process.env.NODE_ENV === "production";
   },
+  /** "fs" (default): uploads on local disk. "db": uploads in Postgres, for split or serverless hosting. */
+  get storageBackend() {
+    return str(process.env.VOICERAG_STORAGE_BACKEND, "fs").toLowerCase() === "db" ? "db" : "fs";
+  },
+
+  // --- split deployment (web UI on one host, voice server on another; see docs/DEPLOY-VERCEL.md) ---
+  /** HMAC secret shared by the web host and the voice server for short-lived voice tickets ("" disables). */
+  get voiceTicketSecret() {
+    return (process.env.VOICE_TICKET_SECRET ?? "").trim();
+  },
+  /** Extra browser origins allowed to open the voice WebSocket, e.g. https://voicerag.vercel.app. */
+  get voiceAllowedOrigins() {
+    return (process.env.VOICE_ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((o) => o.trim().replace(/\/$/, ""))
+      .filter(Boolean);
+  },
+  /** Base URL of the voice server, used by the web host for readiness, e.g. https://voice.up.railway.app. */
+  get voiceServerUrl() {
+    return (process.env.VOICE_SERVER_URL ?? "").trim().replace(/\/$/, "");
+  },
 
   // --- providers ---
   get sttProvider() {
@@ -122,6 +143,13 @@ export const env = {
   },
   get embedDim() {
     return num(process.env.EMBED_DIM, 768, 1);
+  },
+  /** OpenAI-compatible embeddings endpoint (EMBED_PROVIDER=openai); defaults to OPENAI_BASE_URL. */
+  get embedBaseUrl() {
+    return str(process.env.EMBED_BASE_URL, this.openaiBaseUrl).replace(/\/$/, "");
+  },
+  get embedApiKey() {
+    return (process.env.EMBED_API_KEY ?? "").trim() || this.openaiKey;
   },
   get ttsProvider() {
     return str(process.env.TTS_PROVIDER, "piper").toLowerCase();

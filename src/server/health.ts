@@ -1,6 +1,7 @@
 // Liveness / readiness state shared between the custom server and the Next.js API routes
 // (same process, so a globalThis slot is enough).
 import { prisma } from "@/lib/db";
+import { env } from "@/lib/env";
 import { cacheStats } from "./rag/retrieve";
 import { providerHealth } from "./providers/registry";
 import { sessionStats } from "./voice/session";
@@ -32,12 +33,15 @@ async function computeReadiness() {
   } catch {
     db = false;
   }
-  const providers = await providerHealth();
+  // On Vercel this process is only the web UI: the voice server (and its providers) is elsewhere.
+  const remote = process.env.VERCEL ? await voiceServerHealth() : null;
+  const providers = remote ? { voiceServer: remote } : await providerHealth();
   const providersOk = Object.values(providers).every((h) => h.ok);
+  const warm = remote ? remote.ok : state.ready;
   const queue = db ? await prisma.documentVersion.groupBy({ by: ["status"], _count: true }).catch(() => []) : [];
   return {
-    ready: state.ready && db && providersOk,
-    warm: state.ready,
+    ready: warm && db && providersOk,
+    warm,
     warmupMs: state.warmupMs,
     db,
     providers,
@@ -45,4 +49,14 @@ async function computeReadiness() {
     caches: cacheStats(),
     sessions: sessionStats(),
   };
+}
+
+async function voiceServerHealth(): Promise<{ ok: boolean; detail: string }> {
+  if (!env.voiceServerUrl) return { ok: false, detail: "VOICE_SERVER_URL is not set" };
+  try {
+    const r = await fetch(`${env.voiceServerUrl}/api/ready`, { signal: AbortSignal.timeout(4000), cache: "no-store" });
+    return { ok: r.ok, detail: `${env.voiceServerUrl} (${r.ok ? "ready" : `HTTP ${r.status}`})` };
+  } catch (e) {
+    return { ok: false, detail: `${env.voiceServerUrl} unreachable (${e instanceof Error ? e.message : String(e)})` };
+  }
 }

@@ -54,14 +54,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 curl c
 COPY --from=build /src/build/bin/whisper-server /usr/local/bin/whisper-server
 COPY --from=model /models /models
 ENV WHISPER_MODEL=${WHISPER_MODEL} \
-    WHISPER_THREADS=4
+    WHISPER_THREADS=4 \
+    WHISPER_HOST=0.0.0.0
 USER whisper
 EXPOSE 8178
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD curl -fsS -o /dev/null http://127.0.0.1:8178/ || exit 1
 # Same flags as scripts/stt-server.sh, but listening on all container interfaces (the port is only
-# reachable on the internal compose network; it is never published to the host).
+# reachable on the internal compose network; it is never published to the host). Set WHISPER_HOST=::
+# where the private network is IPv6 (Railway, see docs/DEPLOY-VERCEL.md).
 #   -nt no timestamps; -bs 1 / -bo 1 greedy decoding; -nf no temperature fallback (bounded latency);
 #   -nc NEVER condition on the previous request's text: the server is shared by all users, so without
 #       it one user's transcript would bias (and leak into) the next user's decoding.
-CMD ["sh", "-c", "exec whisper-server -m /models/ggml-${WHISPER_MODEL}.bin --host 0.0.0.0 --port 8178 -t ${WHISPER_THREADS} -nt -nc -nf -bs 1 -bo 1 -l en"]
+CMD ["sh", "-c", "exec whisper-server -m /models/ggml-${WHISPER_MODEL}.bin --host ${WHISPER_HOST} --port 8178 -t ${WHISPER_THREADS} -nt -nc -nf -bs 1 -bo 1 -l en"]

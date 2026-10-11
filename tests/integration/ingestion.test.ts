@@ -81,6 +81,23 @@ describe("ingestion", () => {
     expect(fs.existsSync(path)).toBe(false);
   });
 
+  it("stores uploads in Postgres with VOICERAG_STORAGE_BACKEND=db (split hosting) and erases them on delete", async () => {
+    process.env.VOICERAG_STORAGE_BACKEND = "db";
+    try {
+      const r = await uploadDocument(s.admin, { collectionId: general, filename: "lockers.md", data: md("Lockers", "Day lockers are on the third floor next to the showers.") });
+      const v = await prisma.documentVersion.findUniqueOrThrow({ where: { id: r.versionId } });
+      expect(v.storagePath).toBe(`db:${v.contentHash}`);
+      await drainQueue();
+      expect((await prisma.documentVersion.findUniqueOrThrow({ where: { id: r.versionId } })).status).toBe("READY");
+      const scope = await scopeFor(s.alice.id);
+      expect((await retrieve(scope, "Where are the day lockers?")).evidence.some((e) => e.documentId === r.documentId)).toBe(true);
+      await deleteDocument(s.admin, r.documentId);
+      expect(await prisma.documentBlob.count({ where: { contentHash: v.contentHash } })).toBe(0);
+    } finally {
+      delete process.env.VOICERAG_STORAGE_BACKEND;
+    }
+  });
+
   it("marks unparseable documents FAILED after bounded retries", async () => {
     const r = await uploadDocument(s.admin, { collectionId: general, filename: "broken.pdf", data: Buffer.from("%PDF-1.7 this is not really a pdf") });
     await drainQueue();

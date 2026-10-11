@@ -30,8 +30,13 @@ export function route<P = Record<string, string>>(
 /** Header set by server.ts from the socket address (or a trusted proxy); never taken from the client. */
 export const CLIENT_IP_HEADER = "x-voicerag-client-ip";
 
-/** Client IP for rate limiting. Only the custom server can set this header (it strips client copies). */
+/**
+ * Client IP for rate limiting. Only the custom server can set this header (it strips client copies).
+ * On Vercel there is no custom server (so the header above could be client-supplied); Vercel's edge
+ * sets x-real-ip and overwrites client copies.
+ */
 export function clientIp(req: NextRequest) {
+  if (process.env.VERCEL) return req.headers.get("x-real-ip") ?? "unknown";
   return req.headers.get(CLIENT_IP_HEADER) ?? "unknown";
 }
 

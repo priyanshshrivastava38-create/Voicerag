@@ -16,6 +16,20 @@ export interface VoiceClientEvents {
   onError: (code: string, message: string) => void;
 }
 
+/**
+ * Voice WebSocket URL. Same-origin by default (the session cookie authenticates). When the voice
+ * server is hosted separately (NEXT_PUBLIC_VOICE_WS_URL, e.g. wss://voice.example.com), the cookie
+ * is not sent cross-site, so a short-lived ticket from /api/voice/ticket is attached instead.
+ */
+async function socketUrl(): Promise<string> {
+  const remote = (process.env.NEXT_PUBLIC_VOICE_WS_URL ?? "").trim().replace(/\/$/, "");
+  if (!remote) return `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${WS_PATH}`;
+  const r = await fetch("/api/voice/ticket", { cache: "no-store" });
+  if (!r.ok) throw new Error(`ticket ${r.status}`);
+  const { ticket } = (await r.json()) as { ticket: string };
+  return `${remote}${WS_PATH}?ticket=${encodeURIComponent(ticket)}`;
+}
+
 const PRE_ROLL_FRAMES = 15; // 300 ms of audio before the VAD fired, so first syllables aren't clipped
 const BARGE_IN_SENSITIVITY = 2.5; // VAD threshold multiplier while the assistant is audible (echo guard)
 
@@ -69,8 +83,15 @@ export class VoiceClient {
 
   private open() {
     this.setConn(this.reconnectAttempts ? "reconnecting" : "connecting");
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    const ws = new WebSocket(`${proto}//${location.host}${WS_PATH}`);
+    void socketUrl().then(
+      (url) => {
+        if (this.wantOpen && !this.ws) this.attach(new WebSocket(url));
+      },
+      () => this.onClosed(1006), // ticket request failed: same handling as a dropped connection
+    );
+  }
+
+  private attach(ws: WebSocket) {
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     ws.onopen = () => {
@@ -82,28 +103,32 @@ export class VoiceClient {
     ws.onmessage = (ev) => (typeof ev.data === "string" ? this.onServer(JSON.parse(ev.data) as ServerMsg) : this.onAudio(ev.data as ArrayBuffer));
     ws.onclose = (ev) => {
       this.ws = null;
-      this.player.stop();
-      if (!this.wantOpen) return this.setConn("disconnected");
-      if (ev.code === 1008 || this.reconnectAttempts >= 6) {
-        this.wantOpen = false;
-        this.stopMic();
-        this.setConn("disconnected");
-        this.setAssistant("idle");
-        // A rejected upgrade is indistinguishable from a network drop (1006): ask the API which it was.
-        void fetch("/api/me")
-          .then((r) => r.status === 401)
-          .catch(() => false)
-          .then((expired) =>
-            expired
-              ? this.events.onError("SESSION_EXPIRED", "Your session has expired. Sign in again to continue.")
-              : this.events.onError("DISCONNECTED", "Connection to the server was lost. Check your network, then start again."),
-          );
-        return;
-      }
-      const delay = Math.min(8000, 400 * 2 ** this.reconnectAttempts++);
-      this.setConn("reconnecting");
-      setTimeout(() => this.wantOpen && this.open(), delay);
+      this.onClosed(ev.code);
     };
+  }
+
+  private onClosed(code: number) {
+    this.player.stop();
+    if (!this.wantOpen) return this.setConn("disconnected");
+    if (code === 1008 || this.reconnectAttempts >= 6) {
+      this.wantOpen = false;
+      this.stopMic();
+      this.setConn("disconnected");
+      this.setAssistant("idle");
+      // A rejected upgrade is indistinguishable from a network drop (1006): ask the API which it was.
+      void fetch("/api/me")
+        .then((r) => r.status === 401)
+        .catch(() => false)
+        .then((expired) =>
+          expired
+            ? this.events.onError("SESSION_EXPIRED", "Your session has expired. Sign in again to continue.")
+            : this.events.onError("DISCONNECTED", "Connection to the server was lost. Check your network, then start again."),
+        );
+      return;
+    }
+    const delay = Math.min(8000, 400 * 2 ** this.reconnectAttempts++);
+    this.setConn("reconnecting");
+    setTimeout(() => this.wantOpen && this.open(), delay);
   }
 
   disconnect() {

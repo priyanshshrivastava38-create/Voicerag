@@ -4,7 +4,6 @@
 //   point the document at this version, bump the index version.
 // Retries are idempotent: chunks are keyed (versionId, ordinal) and replaced wholesale, and the
 // embedding cache means a retry never pays for embeddings twice.
-import fs from "node:fs/promises";
 import { prisma } from "@/lib/db";
 import { sha256 } from "@/lib/crypto";
 import { env } from "@/lib/env";
@@ -18,6 +17,7 @@ import { kindFromFilename } from "./validate";
 import { vectorLiteral } from "./vector";
 import { neutralizeInjections } from "./prompt";
 import { auditAsync } from "../audit";
+import { readStoredFile } from "../storage";
 
 const MAX_ATTEMPTS = 3;
 const STALE_LOCK_MINUTES = 10;
@@ -47,7 +47,7 @@ export async function processVersion(versionId: string): Promise<void> {
     if (v.document.deletedAt) throw new Error("Document was deleted before indexing.");
     const kind = kindFromFilename(v.document.filename);
     if (!kind) throw new Error("Unsupported file type.");
-    const buf = await fs.readFile(v.storagePath);
+    const buf = await readStoredFile(v.storagePath);
     if (sha256(buf) !== v.contentHash) throw new Error("Stored file failed its integrity check.");
     const extracted = await extract(kind, buf);
     const drafts = chunkBlocks(extracted.blocks, env.chunkTargetWords, env.chunkOverlapWords);
