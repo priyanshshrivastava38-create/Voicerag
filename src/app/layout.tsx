@@ -5,7 +5,7 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 
 export const metadata: Metadata = {
-  title: "VIH VoiceRAG",
+  title: { default: "VIH VoiceRAG", template: "%s · VIH VoiceRAG" },
   description: "Voice knowledge assistant for VIH Metaverse",
   icons: { icon: "/brand/vih-icon.png" },
 };

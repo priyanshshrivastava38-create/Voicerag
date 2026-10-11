@@ -39,6 +39,8 @@ model User {
   passwordHash String
   role         Role          @default(MEMBER)
   disabled     Boolean       @default(false)
+  /// Set for admin-issued temporary passwords; the user must choose their own before using the app.
+  mustChangePassword Boolean @default(false)
   createdAt    DateTime      @default(now())
   sessions     Session[]
   groups       GroupMember[]
@@ -55,6 +57,7 @@ model Session {
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([expiresAt])
 }
 
 /// A department / team. Collections are granted to groups, never directly to users.
@@ -117,6 +120,14 @@ model Document {
   deletedAt        DateTime?
 
   @@index([collectionId, deletedAt])
+}
+
+/// Uploaded file bytes when VOICERAG_STORAGE_BACKEND=db (split or serverless hosting, no shared disk).
+/// Content-addressed: DocumentVersion.storagePath is "db:<contentHash>".
+model DocumentBlob {
+  contentHash String   @id
+  data        Bytes
+  createdAt   DateTime @default(now())
 }
 
 /// One uploaded revision. Doubles as the ingestion job record: the worker claims QUEUED rows

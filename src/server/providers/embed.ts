@@ -62,12 +62,12 @@ export class OpenAiCompatibleEmbed implements EmbedProvider {
   constructor(
     public model = env.embedModel,
     public dim = env.embedDim,
-    private baseUrl = env.openaiBaseUrl,
-    private apiKey = env.openaiKey,
+    private baseUrl = env.embedBaseUrl,
+    private apiKey = env.embedApiKey,
   ) {}
 
   async embed(texts: string[], _kind: "query" | "document", signal: AbortSignal = new AbortController().signal) {
-    if (!this.apiKey) throw new ProviderError(this.name, "AUTH", "OPENAI_API_KEY is not configured");
+    if (!this.apiKey) throw new ProviderError(this.name, "AUTH", "EMBED_API_KEY (or OPENAI_API_KEY) is not configured");
     const s = withTimeout(signal, EMBED_TIMEOUT_MS);
     try {
       const res = await ensureOk(
@@ -79,7 +79,9 @@ export class OpenAiCompatibleEmbed implements EmbedProvider {
           signal: s,
         }),
       );
-      const j = (await res.json()) as { data: { embedding: number[]; index: number }[] };
+      const j = (await res.json()) as { data?: { embedding: number[]; index: number }[] };
+      if (!j.data || j.data.length !== texts.length) throw new ProviderError(this.name, "BAD_RESPONSE", "embedding count mismatch");
+      if (j.data[0]?.embedding.length !== this.dim) throw new ProviderError(this.name, "BAD_RESPONSE", `expected ${this.dim} dims, got ${j.data[0]?.embedding.length}`);
       return j.data.sort((a, b) => a.index - b.index).map((d) => l2normalize(d.embedding));
     } catch (e) {
       mapFetchError(this.name, e, s);
@@ -89,6 +91,6 @@ export class OpenAiCompatibleEmbed implements EmbedProvider {
   async warmup() {}
 
   async health(): Promise<Health> {
-    return this.apiKey ? { ok: true, detail: `${this.baseUrl} (not probed)` } : { ok: false, detail: "OPENAI_API_KEY missing" };
+    return this.apiKey ? { ok: true, detail: `${this.baseUrl} (not probed)` } : { ok: false, detail: "EMBED_API_KEY missing" };
   }
 }

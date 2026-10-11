@@ -1,7 +1,10 @@
 // Route-handler wrapper: authentication, consistent errors, same-origin check for mutations.
 import { NextRequest, NextResponse } from "next/server";
 import { type AuthUser, requireUser } from "./auth";
-import { forbidden, toResponse } from "./errors";
+import { ApiError, forbidden, toResponse } from "./errors";
+
+/** Routes usable while a user still has an admin-issued temporary password. */
+const PASSWORD_FLOW = new Set(["/api/auth/password", "/api/auth/logout", "/api/me"]);
 
 type Ctx<P> = { params: Promise<P> };
 
@@ -12,6 +15,9 @@ export function route<P = Record<string, string>>(
     try {
       if (req.method !== "GET" && req.method !== "HEAD") assertSameOrigin(req);
       const user = await requireUser();
+      if (user.mustChangePassword && !PASSWORD_FLOW.has(req.nextUrl.pathname)) {
+        throw new ApiError(403, "PASSWORD_CHANGE_REQUIRED", "Choose a new password before continuing.");
+      }
       const result = await handler(req, user, await ctx.params);
       if (result instanceof Response) return result;
       return NextResponse.json(result ?? { ok: true });
@@ -21,8 +27,21 @@ export function route<P = Record<string, string>>(
   };
 }
 
+/** Header set by server.ts from the socket address (or a trusted proxy); never taken from the client. */
+export const CLIENT_IP_HEADER = "x-voicerag-client-ip";
+
+/**
+ * Client IP for rate limiting. Only the custom server can set this header (it strips client copies).
+ * On Vercel there is no custom server (so the header above could be client-supplied); Vercel's edge
+ * sets x-real-ip and overwrites client copies.
+ */
+export function clientIp(req: NextRequest) {
+  if (process.env.VERCEL) return req.headers.get("x-real-ip") ?? "unknown";
+  return req.headers.get(CLIENT_IP_HEADER) ?? "unknown";
+}
+
 /** CSRF defence in depth (cookies are SameSite=Lax): mutations must come from our own origin. */
-function assertSameOrigin(req: NextRequest) {
+export function assertSameOrigin(req: NextRequest) {
   const origin = req.headers.get("origin");
   if (!origin) return; // non-browser clients (curl, tests) do not send Origin
   const host = req.headers.get("x-forwarded-host") ?? req.headers.get("host");

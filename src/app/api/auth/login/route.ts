@@ -1,11 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
+import { assertSameOrigin, clientIp } from "@/lib/api";
 import { toResponse } from "@/lib/errors";
 import { login } from "@/server/users";
 
 export async function POST(req: NextRequest) {
   try {
-    const body = (await req.json().catch(() => ({}))) as { email?: string; password?: string };
-    return NextResponse.json(await login(body.email ?? "", body.password ?? "", req.headers.get("x-forwarded-for") ?? "local"));
+    assertSameOrigin(req); // login CSRF
+    const body = (await req.json().catch(() => ({}))) as { email?: unknown; password?: unknown };
+    const email = typeof body.email === "string" ? body.email : "";
+    const password = typeof body.password === "string" ? body.password : "";
+    return NextResponse.json(await login(email, password, clientIp(req)));
   } catch (e) {
     return toResponse(e);
   }

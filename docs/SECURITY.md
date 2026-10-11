@@ -21,7 +21,8 @@ retention, training-use and residency terms.** Audio goes to at most one STT pro
 | Area | Control | Where |
 |---|---|---|
 | Authentication | Random session token in an httpOnly, SameSite=Lax cookie (Secure in production); only SHA-256 stored; 12 h expiry; disabled users rejected | `src/lib/session.ts`, `src/lib/auth.ts` |
-| Login | Constant-ish time for unknown users; per-IP rate limit; scrypt password hashes; failed logins audited | `src/server/users.ts` |
+| Login | Constant-ish time for unknown users; rate limits per client IP **and** per account (client IP comes from the socket, or from `X-Forwarded-For` only with `TRUST_PROXY=true`); async scrypt hashes (off the event loop); same-origin check; failed logins audited | `src/server/users.ts`, `server.ts` |
+| Accounts | Created by administrators (`/admin/users`) or `npm run admin:create`, with a one-time temporary password the user must replace (≥ 12 characters) before any page, API or voice session works. Disabling a user or resetting a password ends their sessions immediately; an admin cannot demote or disable themselves, and the last active admin cannot be removed. All account and group changes are audited. Demo accounts are refused in production. | `src/server/user-admin.ts`, `src/lib/api.ts`, `upgrade.ts` |
 | Authorisation (RBAC) | `ADMIN` / `MEMBER`; document mutations and metrics are admin-only, enforced server-side | `requireAdmin`, routes |
 | Permission-aware retrieval | Scope = collections granted to the user's groups, computed server-side per turn; enforced inside the SQL query and re-checked in code. Admin rights do not widen retrieval. | `src/server/access.ts`, `retrieve.ts` |
 | Cache isolation | Retrieval cache key = index version + authorisation scope + k + query. No answers are cached. | `retrieve.ts` |
@@ -36,7 +37,7 @@ retention, training-use and residency terms.** Audio goes to at most one STT pro
 | Storage | Documents are content-addressed under `VOICERAG_STORAGE_DIR` (mode 0600, never served statically). Deletion erases files and scrubs citation excerpts. | `documents.ts` |
 | STT isolation | whisper.cpp runs with `-nc`, so one user's transcript never conditions another's decoding | `scripts/stt-server.sh` |
 | Microphone consent | An explicit consent dialog names the providers before the first capture; the mic is active only during a conversation; `Permissions-Policy: microphone=(self)` | `voice-console.tsx`, `next.config.ts` |
-| Headers | nosniff, `X-Frame-Options: DENY`, `Referrer-Policy` | `next.config.ts` |
+| Headers | CSP (same-origin only; `'unsafe-inline'` scripts for Next.js), HSTS in production, nosniff, `X-Frame-Options: DENY`, `Referrer-Policy` | `next.config.ts` |
 | Retention | `npm run retention:purge` (conversations, metrics, expired sessions; audit kept ≥ 1 year) | `scripts/retention-purge.ts` |
 
 Verified by automated tests: permission leakage, cache isolation, IDOR, WebSocket origin and
@@ -45,11 +46,11 @@ against a live server: 401/403/404 responses, cross-origin POST rejected, and he
 
 ## Required before production (not done)
 
-- SSO (OIDC/SAML) and MFA instead of local passwords; group sync from the identity provider.
+- SSO (OIDC/SAML) and MFA instead of local passwords; group sync from the identity provider. (Admin-managed accounts with forced password change are implemented as the interim.)
 - TLS termination (HTTPS/WSS) at a reverse proxy, with HSTS. `getUserMedia` requires HTTPS outside localhost.
 - Encryption at rest for Postgres and document storage (disk or KMS); managed secrets (Vault or a cloud secrets manager).
 - A shared rate limiter and session cap (Redis) if more than one web node runs.
-- A content security policy (CSP) tuned for Next.js.
+- A nonce-based CSP (the current CSP still allows inline scripts, which Next.js needs without nonces).
 - Malware scanning of uploads; OCR policy for scanned PDFs (currently rejected as having no text).
 - A document approval workflow and an injection review queue (the audit event exists; there is no UI yet).
 - Vendor review (DPA, retention, residency) for any cloud provider; a DPIA for voice processing.

@@ -5,6 +5,8 @@ import { summarize } from "@/shared/stats";
 
 export const dynamic = "force-dynamic";
 
+export const metadata = { title: "How it works" };
+
 const STEPS = [
   { n: "01", title: "You speak", tech: "Browser · AudioWorklet", body: "Your browser captures audio at 16 kHz and a voice-activity detector finds where you start and stop talking. Only the parts where you speak are sent — never continuous recording." },
   { n: "02", title: "It listens for the end of your question", tech: "Energy VAD · 150 ms pause / 550 ms end", body: "A short pause starts work early; a longer silence confirms you've finished. If you keep talking, the early work is thrown away." },

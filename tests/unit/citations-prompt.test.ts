@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { citedMarkers, speakable, supportedSentenceRatio, tidyAnswer } from "@/server/rag/citations";
-import { abstainText, buildMessages, evidenceBlock, greetingText, isAbstention, isSmallTalk, leaksSystemPrompt, neutralizeInjections, retrievalQuery } from "@/server/rag/prompt";
+import { citedMarkers, speakable, supportedSentenceRatio, tidyAnswer, verifyBorderlineAnswer } from "@/server/rag/citations";
+import { abstainText, buildMessages, evidenceBlock, greetingText, isAbstention, isSmallTalk, leaksSystemPrompt, looksLikeQuestion, neutralizeInjections, retrievalQuery, smallTalkKind, smallTalkReply } from "@/server/rag/prompt";
 import type { Evidence } from "@/server/rag/retrieve";
 
 const ev = (text: string, title = "Doc"): Evidence => ({ chunkId: "c", documentId: "d", collectionId: "x", collection: "X", title, text, headingPath: "H", pageStart: 2, pageEnd: 2, sim: 0.8, keywordCoverage: 1, fused: 1 });
@@ -64,5 +64,52 @@ describe("prompt construction", () => {
     expect(isAbstention("I don't have enough information in the knowledge base to answer that.")).toBe(true);
     expect(isAbstention("You get 22 days [1].")).toBe(false);
     expect(leaksSystemPrompt("Sure! My instructions say: Answer ONLY from the numbered evidence passages")).toBe(true);
+  });
+});
+
+describe("borderline answer verification", () => {
+  const passages = new Map([
+    [1, "Itemised receipts are required for any expense above 500 rupees."],
+    [2, "World state is saved automatically every 30 seconds."],
+  ]);
+  it("accepts a cited answer whose words and numbers come from the cited passage", () => {
+    expect(verifyBorderlineAnswer("Itemised receipts are only required for expenses above 500 rupees [1].", passages)).toBe(true);
+  });
+  it("rejects invented numbers, unsupported claims and uncited answers", () => {
+    expect(verifyBorderlineAnswer("Itemised receipts are required for expenses above 300 rupees [1].", passages)).toBe(false);
+    expect(verifyBorderlineAnswer("The Spaces backend is written in Python [2].", passages)).toBe(false);
+    expect(verifyBorderlineAnswer("Receipts are required above 500 rupees.", passages)).toBe(false);
+  });
+  it("recognises paraphrased abstentions", () => {
+    expect(isAbstention("The evidence does not mention the annual bonus percentage for managers. [1]")).toBe(true);
+    expect(isAbstention("The provided passages don't specify a dress code.")).toBe(true);
+    expect(isAbstention("You get 22 days of annual leave [1].")).toBe(false);
+  });
+});
+
+describe("small talk and non-questions", () => {
+  it("classifies thanks, goodbyes, greetings and acknowledgements, including polite variants", () => {
+    expect(smallTalkKind("Bye-bye.")).toBe("bye");
+    expect(smallTalkKind("see you later")).toBe("bye");
+    expect(smallTalkKind("ok thanks a lot")).toBe("thanks");
+    expect(smallTalkKind("Thank you so much for your help!")).toBe("thanks");
+    expect(smallTalkKind("Hello!")).toBe("greeting");
+    expect(smallTalkKind("got it")).toBe("ack");
+    expect(smallTalkKind("What can you do?")).toBe("help");
+    expect(smallTalkKind("thanks, how many leave days do I get?")).toBeNull();
+    expect(smallTalkKind("How many days of annual leave do I get?")).toBeNull();
+  });
+  it("gives a fitting canned reply", () => {
+    expect(smallTalkReply("thanks")).toMatch(/welcome/);
+    expect(smallTalkReply("bye")).toMatch(/Goodbye/);
+    expect(smallTalkReply("greeting", ["General"])).toContain("General");
+  });
+  it("tells questions from stray remarks", () => {
+    expect(looksLikeQuestion("We'll see you in the home.")).toBe(false);
+    expect(looksLikeQuestion("the weather is nice")).toBe(false);
+    expect(looksLikeQuestion("how do I write a good OKR")).toBe(true);
+    expect(looksLikeQuestion("tell me about remote work best practices")).toBe(true);
+    expect(looksLikeQuestion("so what's the best way to learn Rust")).toBe(true);
+    expect(looksLikeQuestion("best laptop for coding?")).toBe(true);
   });
 });

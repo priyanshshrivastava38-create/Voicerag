@@ -43,6 +43,27 @@ export const env = {
   get secureCookies() {
     return process.env.NODE_ENV === "production";
   },
+  /** "fs" (default): uploads on local disk. "db": uploads in Postgres, for split or serverless hosting. */
+  get storageBackend() {
+    return str(process.env.VOICERAG_STORAGE_BACKEND, "fs").toLowerCase() === "db" ? "db" : "fs";
+  },
+
+  // --- split deployment (web UI on one host, voice server on another; see docs/DEPLOY-VERCEL.md) ---
+  /** HMAC secret shared by the web host and the voice server for short-lived voice tickets ("" disables). */
+  get voiceTicketSecret() {
+    return (process.env.VOICE_TICKET_SECRET ?? "").trim();
+  },
+  /** Extra browser origins allowed to open the voice WebSocket, e.g. https://voicerag.vercel.app. */
+  get voiceAllowedOrigins() {
+    return (process.env.VOICE_ALLOWED_ORIGINS ?? "")
+      .split(",")
+      .map((o) => o.trim().replace(/\/$/, ""))
+      .filter(Boolean);
+  },
+  /** Base URL of the voice server, used by the web host for readiness, e.g. https://voice.up.railway.app. */
+  get voiceServerUrl() {
+    return (process.env.VOICE_SERVER_URL ?? "").trim().replace(/\/$/, "");
+  },
 
   // --- providers ---
   get sttProvider() {
@@ -61,7 +82,7 @@ export const env = {
     return process.env.SPECULATIVE_PRERENDER !== "false";
   },
   get sttPartialIntervalMs() {
-    return num(process.env.STT_PARTIAL_INTERVAL_MS, 700);
+    return num(process.env.STT_PARTIAL_INTERVAL_MS, 0);
   },
   get llmProvider() {
     return str(process.env.LLM_PROVIDER, "ollama").toLowerCase();
@@ -123,14 +144,21 @@ export const env = {
   get embedDim() {
     return num(process.env.EMBED_DIM, 768, 1);
   },
+  /** OpenAI-compatible embeddings endpoint (EMBED_PROVIDER=openai); defaults to OPENAI_BASE_URL. */
+  get embedBaseUrl() {
+    return str(process.env.EMBED_BASE_URL, this.openaiBaseUrl).replace(/\/$/, "");
+  },
+  get embedApiKey() {
+    return (process.env.EMBED_API_KEY ?? "").trim() || this.openaiKey;
+  },
   get ttsProvider() {
-    return str(process.env.TTS_PROVIDER, "macsay").toLowerCase();
+    return str(process.env.TTS_PROVIDER, "piper").toLowerCase();
   },
   get ttsVoice() {
-    return str(process.env.TTS_VOICE, "Samantha");
+    return str(process.env.TTS_VOICE, "alloy");
   },
   get ttsRateWpm() {
-    return num(process.env.TTS_RATE_WPM, 190, 80);
+    return num(process.env.TTS_RATE_WPM, 180, 80);
   },
   get openaiTtsModel() {
     return str(process.env.OPENAI_TTS_MODEL, "gpt-4o-mini-tts");
@@ -142,22 +170,29 @@ export const env = {
     return process.env.GENERAL_ANSWERS !== "false";
   },
   get ragTopK() {
-    return Math.min(10, num(process.env.RAG_TOP_K, 4, 1));
+    return Math.min(10, num(process.env.RAG_TOP_K, 3, 1));
   },
   get ragCandidates() {
     return Math.min(50, num(process.env.RAG_CANDIDATES, 12, 1));
   },
   get chunkTargetWords() {
-    return num(process.env.CHUNK_TARGET_WORDS, 140, 20);
+    return num(process.env.CHUNK_TARGET_WORDS, 100, 20);
   },
   get chunkOverlapWords() {
-    return num(process.env.CHUNK_OVERLAP_WORDS, 25);
+    return num(process.env.CHUNK_OVERLAP_WORDS, 20);
   },
   get ragMinVectorSim() {
     return num(process.env.RAG_MIN_VECTOR_SIM, 0.73);
   },
   get ragMinVectorSimWithKeyword() {
     return num(process.env.RAG_MIN_VECTOR_SIM_WITH_KEYWORD, 0.66);
+  },
+  /**
+   * Below the strong thresholds but at or above this cosine similarity, the best passages are still
+   * given to the LLM, which answers only if they really answer the question (0 disables).
+   */
+  get ragMinVectorSimBorderline() {
+    return num(process.env.RAG_MIN_VECTOR_SIM_BORDERLINE, 0.6);
   },
   get ragCacheTtlMs() {
     return num(process.env.RAG_CACHE_TTL_SECONDS, 300) * 1000;

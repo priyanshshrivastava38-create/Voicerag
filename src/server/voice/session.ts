@@ -33,13 +33,16 @@ const activeSessions = new Map<string, number>();
 let turnsServed = 0;
 const turnBuckets = new Map<string, { tokens: number; at: number }>();
 
-function allowTurn(userId: string): boolean {
+function allowTurn(userId: string, kind: "turn" | "speculation" = "turn"): boolean {
   const now = Date.now();
-  const cap = env.turnsPerMinute;
-  const b = turnBuckets.get(userId) ?? { tokens: cap, at: now };
+  // Speculative work (STT + pre-rendered turn on every pause) has its own, larger budget: it is
+  // normal to pause a few times per question, but it must not be an unmetered path to the LLM.
+  const cap = kind === "turn" ? env.turnsPerMinute : env.turnsPerMinute * 3;
+  const key = `${kind}:${userId}`;
+  const b = turnBuckets.get(key) ?? { tokens: cap, at: now };
   b.tokens = Math.min(cap, b.tokens + ((now - b.at) / 60_000) * cap);
   b.at = now;
-  turnBuckets.set(userId, b);
+  turnBuckets.set(key, b);
   if (b.tokens < 1) return false;
   b.tokens -= 1;
   return true;
@@ -125,9 +128,20 @@ export class VoiceSession {
   private close() {
     if (this.closed) return;
     this.closed = true;
-    activeSessions.set(this.user.id, Math.max(0, (activeSessions.get(this.user.id) ?? 1) - 1));
+    const left = (activeSessions.get(this.user.id) ?? 1) - 1;
+    if (left > 0) activeSessions.set(this.user.id, left);
+    else activeSessions.delete(this.user.id);
     this.discardUtterance();
     this.active?.abort.abort();
+  }
+
+  /** Run a turn-level task without awaiting it; a failure is reported to the client, never left unhandled. */
+  private background(p: Promise<unknown>) {
+    p.catch((e) => {
+      console.error("[voice] unexpected error:", redactString(String(e)));
+      this.send({ t: "error", code: "INTERNAL", message: "Something went wrong. Please try again.", retryable: true });
+      this.send({ t: "state", state: "idle" });
+    });
   }
 
   private send(msg: ServerMsg) {
@@ -167,7 +181,7 @@ export class VoiceSession {
         }
         return;
       case "speech_end":
-        if (this.utt?.id === msg.uttId) void this.endUtterance(msg.speechMs, msg.hangoverMs);
+        if (this.utt?.id === msg.uttId) this.background(this.endUtterance(msg.speechMs, msg.hangoverMs));
         return;
       case "speech_abort":
         if (this.utt?.id === msg.uttId) {
@@ -177,7 +191,7 @@ export class VoiceSession {
         return;
       case "text": {
         const text = String(msg.text ?? "").trim().slice(0, 1000);
-        if (text) void this.startTurn("text", text, new TurnClock(), { speechMs: null, hangoverMs: null, firstPartialMs: null, sttStart: null, sttDone: null });
+        if (text) this.background(this.startTurn("text", text, new TurnClock(), { speechMs: null, hangoverMs: null, firstPartialMs: null, sttStart: null, sttDone: null }));
         return;
       }
       case "cancel":
@@ -220,7 +234,7 @@ export class VoiceSession {
     if (!u || buf.length < 2) return;
     if (u.samples >= env.maxUtteranceSeconds * MIC_SAMPLE_RATE) {
       // Hard cap: treat as end of turn rather than buffering without bound.
-      void this.endUtterance(Math.round((u.samples / MIC_SAMPLE_RATE) * 1000), 0);
+      this.background(this.endUtterance(Math.round((u.samples / MIC_SAMPLE_RATE) * 1000), 0));
       return;
     }
     const n = buf.length >> 1;
@@ -266,6 +280,7 @@ export class VoiceSession {
     const u = this.utt;
     if (!u || u.samples < MIC_SAMPLE_RATE * 0.2) return;
     if (u.spec) killSpec(u.spec);
+    if (!allowTurn(this.user.id, "speculation")) return; // over budget: the end of turn still works, just not pre-rendered
     const abort = new AbortController();
     const spec: Speculation = { resumed: false, samples: u.samples, sttStart: performance.now(), sttDone: null, transcript: Promise.resolve(""), turn: Promise.resolve(null), abort };
     spec.transcript = this.stt(this.snapshot(u), abort.signal).then((t) => {
@@ -308,10 +323,11 @@ export class VoiceSession {
     let specText = "";
     if (live) {
       specText = await live.transcript.catch(() => "");
-      const st = await live.turn;
-      if (st && !live.abort.signal.aborted && st.historyLen === this.history.length && (await scopeFor(this.user.id)).key === st.scopeKey) {
-        return this.releaseTurn(live, st, eos, { speechMs, hangoverMs, firstPartialMs: u.firstPartialMs });
-      }
+      // A failure here (e.g. a database error resolving the scope) just means the pre-render is not
+      // used: the turn falls through to the normal path below.
+      const st = await live.turn.catch(() => null);
+      const usable = st && !live.abort.signal.aborted && st.historyLen === this.history.length && (await scopeFor(this.user.id).catch(() => null))?.key === st.scopeKey;
+      if (st && usable) return this.releaseTurn(live, st, eos, { speechMs, hangoverMs, firstPartialMs: u.firstPartialMs });
       killSpec(live, st);
     }
 
@@ -488,7 +504,7 @@ export class VoiceSession {
 function killSpec(spec: Speculation, st?: SpecTurn | null) {
   spec.abort.abort();
   if (st) st.gate.discard();
-  else void spec.turn.then((t) => t?.gate.discard());
+  else void spec.turn.then((t) => t?.gate.discard(), () => undefined);
 }
 
 function numOrNull(x: unknown): number | null {

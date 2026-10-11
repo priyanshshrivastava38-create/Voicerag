@@ -15,6 +15,7 @@ import { env } from "@/lib/env";
 import { TtlLru } from "@/lib/lru";
 import type { Scope } from "../access";
 import { providers } from "../providers/registry";
+import { expandQuery } from "./glossary";
 import { indexVersion } from "./index-state";
 import { vectorLiteral } from "./vector";
 
@@ -85,6 +86,7 @@ export function keywordCoverage(terms: string[], text: string): number {
 
 export async function embedQuery(q: string, signal?: AbortSignal): Promise<{ vec: number[]; hit: boolean }> {
   const emb = providers().embed;
+  q = expandQuery(q);
   const key = `${emb.model}|${normalizeQuery(q)}`;
   const hit = embedCache.get(key);
   if (hit) return { vec: hit, hit: true };
@@ -138,6 +140,7 @@ export async function retrieve(scope: Scope, query: string, opts: { k?: number; 
 /** Hybrid candidate search inside the caller's scope, ranked by reciprocal-rank fusion. */
 export async function searchCandidates(scope: Scope, query: string, queryVec: number[]): Promise<{ ranked: Evidence[]; searchMs: number }> {
   if (scope.collectionIds.length === 0) return { ranked: [], searchMs: 0 };
+  query = expandQuery(query);
   const norm = normalizeQuery(query);
   const n = env.ragCandidates;
   const vec = vectorLiteral(queryVec);
@@ -195,10 +198,31 @@ export async function searchCandidates(scope: Scope, query: string, queryVec: nu
 }
 
 /** Evidence selection + abstention. Exported for unit tests and threshold tuning. */
-export function applyPolicy(ranked: Evidence[], k: number, th = { minSim: env.ragMinVectorSim, minSimKw: env.ragMinVectorSimWithKeyword }) {
+export function applyPolicy(
+  ranked: Evidence[],
+  k: number,
+  th = { minSim: env.ragMinVectorSim, minSimKw: env.ragMinVectorSimWithKeyword, minSimBorderline: env.ragMinVectorSimBorderline },
+) {
   const strong = (e: Evidence) => e.sim >= th.minSim || (e.sim >= th.minSimKw && e.keywordCoverage >= 0.5);
   const topSim = ranked.length ? Math.max(...ranked.map((e) => e.sim)) : null;
   if (!ranked.some(strong)) {
+    // Borderline: a plausible match that is not clearly strong. Casually phrased questions land
+    // here ("can I plug a pen drive in" vs "USB mass-storage devices are blocked"), and so do some
+    // unanswerable ones, so similarity alone cannot decide. The best passages go to the LLM, whose
+    // grounded prompt answers only if they actually answer the question and abstains otherwise.
+    const borderline = th.minSimBorderline > 0 ? ranked.filter((e) => e.sim >= th.minSimBorderline).sort((a, b) => b.sim - a.sim) : [];
+    if (borderline.length) {
+      const perDoc = new Map<string, number>();
+      const evidence: Evidence[] = [];
+      for (const e of borderline) {
+        if (evidence.length >= k) break;
+        const c = perDoc.get(e.documentId) ?? 0;
+        if (c >= 2) continue;
+        perDoc.set(e.documentId, c + 1);
+        evidence.push(e);
+      }
+      return { evidence, abstain: false, reason: "borderline", topSim };
+    }
     return { evidence: [] as Evidence[], abstain: true, reason: ranked.length ? "low_relevance" : "no_candidates", topSim };
   }
   // Keep plausibly relevant candidates only, max 2 per document, in fused order.

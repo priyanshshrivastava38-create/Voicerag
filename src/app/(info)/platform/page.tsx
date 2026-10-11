@@ -5,6 +5,8 @@ import { ARCHITECTURE, TECH_LAYERS } from "@/shared/tech-stack";
 
 export const dynamic = "force-dynamic";
 
+export const metadata = { title: "Platform" };
+
 const CAPABILITIES: { area: string; items: [string, string][] }[] = [
   {
     area: "Voice & real-time",

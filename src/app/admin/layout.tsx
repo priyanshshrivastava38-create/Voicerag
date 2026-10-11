@@ -7,6 +7,7 @@ export const dynamic = "force-dynamic";
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {
   const user = await currentUser();
   if (!user) redirect("/login");
+  if (user.mustChangePassword) redirect("/account/password");
   if (user.role !== "ADMIN") redirect("/");
   return (
     <div className="min-h-screen">

@@ -2,6 +2,8 @@
 import Link from "next/link";
 import { Icon } from "@/components/brand";
 
+export const metadata = { title: "About VIH" };
+
 const PRODUCTS = [
   { name: "ViH Messenger", tag: "Messaging SDK", desc: "Enterprise-grade IP2IP messaging SDK connecting your brand to customers through intelligent, always-on conversations.", features: ["Direct IP2IP enterprise messaging", "Embedded AI chatbot conversations", "Real-time engagement at scale", "SDK-first integration"] },
   { name: "ViH Shruti", tag: "AI Voicebot", desc: "Intelligent voice AI that handles customer interactions over voice channels with full conversational context.", features: ["Natural-language voice interactions", "Cross-channel context retention", "Multilingual voice support", "Seamless human-agent handoff"] },

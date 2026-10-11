@@ -4,7 +4,6 @@
 //   point the document at this version, bump the index version.
 // Retries are idempotent: chunks are keyed (versionId, ordinal) and replaced wholesale, and the
 // embedding cache means a retry never pays for embeddings twice.
-import fs from "node:fs/promises";
 import { prisma } from "@/lib/db";
 import { sha256 } from "@/lib/crypto";
 import { env } from "@/lib/env";
@@ -18,6 +17,7 @@ import { kindFromFilename } from "./validate";
 import { vectorLiteral } from "./vector";
 import { neutralizeInjections } from "./prompt";
 import { auditAsync } from "../audit";
+import { readStoredFile } from "../storage";
 
 const MAX_ATTEMPTS = 3;
 const STALE_LOCK_MINUTES = 10;
@@ -47,7 +47,7 @@ export async function processVersion(versionId: string): Promise<void> {
     if (v.document.deletedAt) throw new Error("Document was deleted before indexing.");
     const kind = kindFromFilename(v.document.filename);
     if (!kind) throw new Error("Unsupported file type.");
-    const buf = await fs.readFile(v.storagePath);
+    const buf = await readStoredFile(v.storagePath);
     if (sha256(buf) !== v.contentHash) throw new Error("Stored file failed its integrity check.");
     const extracted = await extract(kind, buf);
     const drafts = chunkBlocks(extracted.blocks, env.chunkTargetWords, env.chunkOverlapWords);
@@ -115,9 +115,9 @@ export async function processVersion(versionId: string): Promise<void> {
 }
 
 /** Process queued work until the queue is empty. Returns the number of versions processed. */
-export async function drainQueue(max = 100): Promise<number> {
+export async function drainQueue(max = 100, shouldStop: () => boolean = () => false): Promise<number> {
   let n = 0;
-  while (n < max) {
+  while (n < max && !shouldStop()) {
     const job = await claimNext();
     if (!job) break;
     await processVersion(job.id);
@@ -126,15 +126,18 @@ export async function drainQueue(max = 100): Promise<number> {
   return n;
 }
 
-/** Long-running poll loop (in-process or `npm run worker`). */
-export function startWorker(intervalMs = 1500) {
+/**
+ * Long-running poll loop (in-process or `npm run worker`). The returned stop function resolves once
+ * the job in progress (if any) has finished, so a shutdown never leaves a version stuck in PROCESSING.
+ */
+export function startWorker(intervalMs = 1500): () => Promise<void> {
   let stopped = false;
   let running = false;
   const tick = async () => {
     if (stopped || running) return;
     running = true;
     try {
-      await drainQueue();
+      await drainQueue(100, () => stopped);
     } catch (e) {
       console.error("[ingest] worker error:", redactString(String(e)));
     } finally {
@@ -143,8 +146,9 @@ export function startWorker(intervalMs = 1500) {
   };
   const id = setInterval(tick, intervalMs);
   void tick();
-  return () => {
+  return async () => {
     stopped = true;
     clearInterval(id);
+    while (running) await new Promise((r) => setTimeout(r, 50));
   };
 }

@@ -9,8 +9,8 @@ import { encodeAudioFrame, type ServerMsg, type SourceRef, type TurnOutcome } fr
 import type { Scope } from "../access";
 import type { Providers } from "../providers/registry";
 import { type ChatMessage, type LlmEvent, ProviderError, isAbort } from "../providers/types";
-import { citedMarkers, speakable, tidyAnswer } from "../rag/citations";
-import { GENERAL_PREFIX, GENERAL_SYSTEM_PROMPT, NO_ACCESS_TEXT, SYSTEM_PROMPT, abstainText, buildMessages, greetingText, isAbstention, isSmallTalk, leaksSystemPrompt, resolveMixedAbstention } from "../rag/prompt";
+import { citedMarkers, speakable, tidyAnswer, verifyBorderlineAnswer } from "../rag/citations";
+import { GENERAL_PREFIX, GENERAL_SYSTEM_PROMPT, NO_ACCESS_TEXT, SYSTEM_PROMPT, abstainText, buildMessages, isAbstention, leaksSystemPrompt, looksLikeQuestion, notAQuestionText, resolveMixedAbstention, smallTalkKind, smallTalkReply } from "../rag/prompt";
 import { looksInternal, topicIntent, topicOverview } from "../rag/intents";
 import type { RetrievalResult } from "../rag/retrieve";
 import { TurnClock } from "./clock";
@@ -147,7 +147,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
   };
 
   /** Stream an LLM reply into tokens + speech, with one bounded retry before the first token. */
-  const streamLlm = async (req: ReturnType<typeof llmRequestFor>, allowSpeculative: boolean) => {
+  /** `buffered`: collect the reply without emitting tokens or speech (it is verified first). */
+  const streamLlm = async (req: ReturnType<typeof llmRequestFor>, allowSpeculative: boolean, buffered = false) => {
     const segmenter = new SpeechSegmenter();
     let attempt = 0;
     for (;;) {
@@ -169,6 +170,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
           }
           result.answer += ev.text;
           if (leaksSystemPrompt(result.answer)) throw new OutputGuardError();
+          if (buffered) continue;
           emit({ t: "token", turnId, text: ev.text });
           enqueue(segmenter.push(ev.text));
         }
@@ -183,7 +185,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
         throw e;
       }
     }
-    enqueue(segmenter.flush());
+    if (!buffered) enqueue(segmenter.flush());
     clock.mark("llmDone");
   };
 
@@ -195,6 +197,19 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
   };
 
   try {
+    // ---- pure small talk ("thanks a lot", "bye-bye") --------------------------------------
+    // Checked on the raw utterance BEFORE retrieval: in a conversation, short follow-ups are merged
+    // with the previous question for retrieval, which would turn "thanks a lot" into a search.
+    // Only whole-utterance pleasantries match; "help me find the leave policy" is a real question.
+    const pleasantry = smallTalkKind(input.question);
+    if (pleasantry && pleasantry !== "help") {
+      clock.mark("evidence");
+      emit({ t: "evidence", turnId, sources: [], abstain: false, reason: "small_talk" });
+      await speakCanned(smallTalkReply(pleasantry, input.scope.collectionNames ?? []));
+      result.grounding = "overview";
+      return await done();
+    }
+
     // ---- topic overview ("what can you do for engineering?") --------------------------
     const topic = topicIntent(input.question);
     if (topic.isTopic && input.scope.collectionIds.length) {
@@ -230,20 +245,33 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
         result.outcome = "abstained";
         return await done();
       }
-      if (isSmallTalk(input.question)) {
-        await speakCanned(greetingText(names));
+      const smallTalk = smallTalkKind(input.question);
+      if (smallTalk) {
+        await speakCanned(smallTalkReply(smallTalk, names));
         result.grounding = "overview";
         return await done();
       }
       // General (non-VIH) questions may get clearly-labelled general guidance; anything that
       // looks like VIH-internal information is never answered from model memory.
+      // Not a question at all (a remark, or speech picked up from the room): ask again rather than
+      // answering "not in the knowledge base" or improvising general guidance.
+      if (!looksLikeQuestion(input.question)) {
+        await speakCanned(notAQuestionText(names));
+        result.grounding = "overview";
+        return await done();
+      }
       if (env.generalAnswers && !looksInternal(input.question)) {
         emit({ t: "state", state: "thinking", turnId });
         result.grounding = "general";
         await speakCanned(GENERAL_PREFIX);
         await streamLlm({ system: GENERAL_SYSTEM_PROMPT, messages: [...input.history.slice(-4), { role: "user", content: input.question }], maxTokens: Math.max(env.llmMaxTokens, 240), temperature: 0.3 }, false);
         result.answer = tidyAnswer(result.answer);
-        if (isAbstention(result.answer.slice(GENERAL_PREFIX.length))) {
+        const general = result.answer.slice(GENERAL_PREFIX.length);
+        // An empty or one-word reply is as unhelpful as an abstention.
+        if (isAbstention(general) || (general.match(/[A-Za-z]{2,}/g) ?? []).length < 3) {
+          // Don't show "here's general guidance. I don't have enough information…" — the final
+          // text (answer_done) replaces the streamed tokens with a single, consistent abstention.
+          result.answer = abstainText(names);
           result.abstained = true;
           result.outcome = "abstained";
           result.grounding = "none";
@@ -259,7 +287,19 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
     // ---- grounded generation from VIH documents ----------------------------------------
     emit({ t: "state", state: "thinking", turnId });
     result.grounding = "documents";
-    await streamLlm(llmRequestFor(input.question, retrieval.evidence, input.history), true);
+    if (retrieval.reason === "borderline") {
+      // Borderline evidence: generate in full, verify against the passages, then speak. Slower
+      // to first audio than streaming, but a wrong policy answer costs more than a short wait.
+      await streamLlm(llmRequestFor(input.question, retrieval.evidence, input.history), false, true);
+      const passages = new Map(retrieval.evidence.map((e, i) => [i + 1, e.text]));
+      const draft = resolveMixedAbstention(result.answer).text;
+      const verified = !isAbstention(draft) && verifyBorderlineAnswer(draft, passages);
+      result.answer = "";
+      await speakCanned(verified ? draft : abstainText(input.scope.collectionNames ?? []));
+      if (!verified) clock.mark("borderlineRejected");
+    } else {
+      await streamLlm(llmRequestFor(input.question, retrieval.evidence, input.history), true);
+    }
     finishProducer();
     await consumer;
     signal.throwIfAborted();
@@ -268,6 +308,9 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnRes
     if (mixed.changed) result.answer = mixed.text;
     result.abstained = isAbstention(result.answer);
     if (result.abstained) {
+      // Replace the model's wording ("I don't have enough information… [1]") with the standard
+      // abstention, which drops stray citation markers and tells the user what they can ask about.
+      result.answer = abstainText(input.scope.collectionNames ?? []);
       result.outcome = "abstained";
       result.grounding = "none";
     }

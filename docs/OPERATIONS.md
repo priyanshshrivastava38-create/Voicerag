@@ -30,8 +30,14 @@ browser ───────────────▶ reverse proxy (TLS, HST
 ```
 
 - Build: `npm ci && npx prisma migrate deploy && npm run build`. Run `npm start` under a supervisor (systemd or a container) with `NODE_ENV=production`.
-  Mock providers are refused in production.
+  Mock providers are refused in production. The server refuses to start, with a message naming the problem, when `DATABASE_URL` is missing or unreachable or a provider name is unknown.
+- Container deployment: for a complete single-VM stack (Postgres, Ollama, whisper.cpp, Piper, the app and Caddy for HTTPS, all in Docker Compose), follow [DEPLOY.md](DEPLOY.md) and use the files in `deploy/`.
+- Container: `docker build -t vih-voicerag .`, then `docker run --rm --env-file .env vih-voicerag npx prisma migrate deploy` once per release, and
+  `docker run -d --env-file .env -p 3100:3100 -v voicerag-storage:/app/storage vih-voicerag`. The image runs as a non-root user and has a `HEALTHCHECK` on `/api/health`.
+  Point `DATABASE_URL`, `OLLAMA_URL`, `WHISPERCPP_URL` and `PIPER_URL` at hosts reachable from the container (not `127.0.0.1`).
 - Proxy: forward `Upgrade`/`Connection` headers for `/ws/voice`; set idle timeouts above 120 s; the app must see the original `Host` and `Origin`.
+  Set `TRUST_PROXY=true` so login rate limiting keys on the real client IP (the proxy must append to `X-Forwarded-For`). The app's HTTP keep-alive (65 s) outlasts typical proxy idle timeouts.
+- Shutdown: on SIGTERM the server flips readiness to false, closes voice sessions (code 1001), lets the in-flight ingestion job finish, closes HTTP and the database pool, and exits (hard deadline 10 s; the standalone worker allows 60 s). Dead WebSocket peers are detected by a 30 s ping and released.
 - Health: `GET /api/health` (liveness), `GET /api/ready` (DB, providers and warm-up; detailed output for admins only). Gate traffic on readiness.
 - Scale ingestion separately with `VOICERAG_INPROCESS_WORKER=false` on web nodes and `npm run worker` elsewhere.
 - Schedule `npm run retention:purge` daily.

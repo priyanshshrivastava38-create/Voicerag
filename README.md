@@ -69,7 +69,13 @@ npm run seed:docs && npm run db:seed       # synthetic users/collections/docs, i
 npm run build && npm start                 # http://localhost:3100
 ```
 
-Synthetic accounts (password = `VOICERAG_SEED_PASSWORD`):
+**Deploying for real users:** follow [docs/DEPLOY.md](docs/DEPLOY.md) (single Linux VM, Docker Compose, automatic HTTPS),
+or [docs/DEPLOY-VERCEL.md](docs/DEPLOY-VERCEL.md) (web UI on Vercel, voice server and speech-to-text on Railway, Neon Postgres).
+Accounts are created by an administrator under **Users** (`/admin/users`); the first administrator is created with
+`npm run admin:create -- --email you@company.com --name "Your Name"`. Load the demo documents without demo accounts
+with `npm run db:seed -- --docs-only`.
+
+Synthetic development accounts (password = `VOICERAG_SEED_PASSWORD`; never created in production):
 
 | User | Role | Can retrieve from |
 |---|---|---|
@@ -100,4 +106,5 @@ Synthetic accounts (password = `VOICERAG_SEED_PASSWORD`):
 - [docs/SECURITY.md](docs/SECURITY.md): controls, data flows, privacy, production gaps
 - [docs/PROVIDERS.md](docs/PROVIDERS.md): provider configuration and selection criteria
 - [docs/TECH-STACK.md](docs/TECH-STACK.md): every technology, with version and role
+- [docs/DEPLOY-VERCEL.md](docs/DEPLOY-VERCEL.md): split hosting on Vercel + Railway + Neon
 - [docs/OPERATIONS.md](docs/OPERATIONS.md): deployment, troubleshooting, cost, backup, readiness checklist

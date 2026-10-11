@@ -5,8 +5,10 @@ import type { AddressInfo } from "node:net";
 import { parse } from "node:url";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import WebSocket, { WebSocketServer } from "ws";
+import { sha256 } from "@/lib/crypto";
 import { prisma } from "@/lib/db";
 import { issueSessionToken, SESSION_COOKIE } from "@/lib/session";
+import { issueVoiceTicket, VOICE_TICKET_TTL_MS } from "@/lib/voice-ticket";
 import { providers } from "@/server/providers/registry";
 import { encodeTextAsPcm } from "@/server/providers/mock";
 import { authorizeUpgrade } from "@/server/voice/upgrade";
@@ -98,6 +100,32 @@ describe("voice WebSocket", () => {
     const { token } = await issueSessionToken(s.alice.id);
     const evil = new WebSocket(`ws://127.0.0.1:${port}/ws/voice`, { headers: { Cookie: `${SESSION_COOKIE}=${token}`, Origin: "https://evil.example" } });
     await expect(new Promise((res, rej) => { evil.once("open", res); evil.once("error", rej); })).rejects.toThrow(/403/);
+  });
+
+  it("accepts a split-hosted web UI with a voice ticket, and rejects bad, expired or revoked tickets", async () => {
+    process.env.VOICE_TICKET_SECRET = "test-ticket-secret";
+    process.env.VOICE_ALLOWED_ORIGINS = "https://ui.example, https://other.example/";
+    const attempt = (ticket: string, origin = "https://ui.example") =>
+      new Promise((res, rej) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${port}/ws/voice?ticket=${encodeURIComponent(ticket)}`, { headers: { Origin: origin } });
+        open.push(ws);
+        ws.once("open", () => res("open"));
+        ws.once("error", rej);
+      });
+    try {
+      const { token } = await issueSessionToken(s.alice.id);
+      const ticket = issueVoiceTicket(s.alice.id, sha256(token));
+      await expect(attempt(ticket)).resolves.toBe("open");
+      await expect(attempt(ticket, "https://other.example")).resolves.toBe("open");
+      await expect(attempt(ticket, "https://evil.example")).rejects.toThrow(/403/);
+      await expect(attempt(`${ticket.split(".")[0]}.forged`)).rejects.toThrow(/401/);
+      await expect(attempt(issueVoiceTicket(s.alice.id, sha256(token), Date.now() - VOICE_TICKET_TTL_MS - 1))).rejects.toThrow(/401/);
+      await prisma.session.deleteMany({ where: { tokenHash: sha256(token) } });
+      await expect(attempt(ticket)).rejects.toThrow(/401/);
+    } finally {
+      delete process.env.VOICE_TICKET_SECRET;
+      delete process.env.VOICE_ALLOWED_ORIGINS;
+    }
   });
 
   it("runs a complete voice turn: speculative STT → retrieval → streamed answer → audio → persistence", async () => {
